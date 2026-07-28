@@ -1,0 +1,14 @@
+# GRAG Backend Requirements
+fastapi
+uvicorn[standard]
+pydantic
+pydantic-settings
+sqlalchemy
+aiosqlite
+httpx
+qdrant-client
+pdfplumber
+python-docx
+python-multipart
+networkx
+python-dotenv

@@ -1,0 +1,21 @@
+# Python virtual environment
+backend/.venv/
+**/__pycache__/
+*.pyc
+
+# Node dependencies
+frontend/node_modules/
+frontend/.next/
+
+# Local databases and uploads (Qdrant storage, SQLite db, knowledge graph json, uploads folder)
+data/
+backend/data/
+
+# Local environment variables
+.env
+backend/.env
+frontend/.env.local
+
+# OS files
+.DS_Store
+Thumbs.db
