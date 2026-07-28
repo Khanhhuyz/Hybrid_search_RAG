@@ -1,0 +1,453 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>GRAG — Mini GraphRAG</title>
+  <!-- Mermaid.js CDN for diagram rendering -->
+  <script type="module">
+    import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
+    mermaid.initialize({ startOnLoad: true, theme: 'dark' });
+  </script>
+  <style>
+    :root {
+      --bg: #0a0b0f;
+      --card: #12141a;
+      --border: #252836;
+      --text: #f1f5f9;
+      --muted: #94a3b8;
+      --accent: #6366f1;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      line-height: 1.5;
+      padding: 1.5rem 1rem;
+    }
+    .container {
+      max-width: 780px;
+      width: 100%;
+      margin: 0 auto;
+    }
+    header {
+      margin-bottom: 1.25rem;
+      border-bottom: 1px solid var(--border);
+      padding-bottom: 1rem;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    h1 {
+      font-size: 1.5rem;
+      font-weight: 700;
+      color: var(--text);
+    }
+    .subtitle {
+      color: var(--muted);
+      font-size: 0.85rem;
+      margin-top: 0.2rem;
+    }
+    /* i18n Switcher Button */
+    .lang-switcher {
+      display: flex;
+      align-items: center;
+      background: #181b26;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 2px;
+    }
+    .lang-btn {
+      background: transparent;
+      border: none;
+      color: var(--muted);
+      font-size: 0.75rem;
+      font-weight: 600;
+      padding: 4px 8px;
+      border-radius: 6px;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+    .lang-btn.active {
+      background: var(--accent);
+      color: #fff;
+    }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 1rem 1.25rem;
+      margin-bottom: 1rem;
+    }
+    .card-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 0.5rem;
+    }
+    .card h2 {
+      font-size: 1rem;
+      color: var(--text);
+    }
+    .hint {
+      font-size: 0.75rem;
+      color: var(--accent);
+      cursor: pointer;
+    }
+    ul {
+      list-style: none;
+    }
+    li {
+      margin-bottom: 0.4rem;
+      color: #cbd5e1;
+      font-size: 0.85rem;
+      display: flex;
+      align-items: flex-start;
+      gap: 0.4rem;
+    }
+    li::before {
+      content: "•";
+      color: var(--accent);
+      font-weight: bold;
+    }
+    .grid-2 {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 0.75rem;
+      margin-top: 0.5rem;
+    }
+    .box {
+      background: #0f1117;
+      border: 1px solid var(--border);
+      padding: 0.75rem;
+      border-radius: 8px;
+      font-size: 0.8rem;
+    }
+    .box-title {
+      font-weight: 600;
+      color: var(--accent);
+      margin-bottom: 0.2rem;
+    }
+    .links {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 1rem;
+      margin-top: 0.75rem;
+    }
+    a {
+      color: var(--accent);
+      text-decoration: none;
+      font-size: 0.85rem;
+      font-weight: 500;
+    }
+    a:hover {
+      text-decoration: underline;
+    }
+    code {
+      font-family: monospace;
+      background: #181b26;
+      padding: 0.1rem 0.3rem;
+      border-radius: 4px;
+      color: #a5b4fc;
+      font-size: 0.8rem;
+    }
+    footer {
+      margin-top: 2rem;
+      color: var(--muted);
+      font-size: 0.75rem;
+      border-top: 1px solid var(--border);
+      padding-top: 0.75rem;
+    }
+    .mermaid {
+      background: #0d0f14;
+      padding: 0.5rem;
+      border-radius: 8px;
+      display: flex;
+      justify-content: center;
+      cursor: pointer;
+      border: 1px solid transparent;
+    }
+    .mermaid:hover {
+      border-color: var(--accent);
+    }
+    .mermaid svg {
+      max-height: 210px !important;
+      width: 100% !important;
+      height: auto !important;
+    }
+    /* Fullscreen Modal */
+    .modal {
+      display: none;
+      position: fixed;
+      inset: 0;
+      z-index: 1000;
+      background: rgba(0, 0, 0, 0.85);
+      -webkit-backdrop-filter: blur(8px);
+      backdrop-filter: blur(8px);
+      padding: 1rem;
+      justify-content: center;
+      align-items: center;
+    }
+    .modal.active {
+      display: flex;
+    }
+    .modal-content {
+      background: #0f1117;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 1.5rem;
+      width: 95vw;
+      max-width: 1100px;
+      max-height: 90vh;
+      overflow: auto;
+      position: relative;
+    }
+    #modalDiagramContainer svg {
+      max-height: 80vh !important;
+      min-height: 350px !important;
+      width: 100% !important;
+      height: auto !important;
+    }
+    .close-btn {
+      position: absolute;
+      top: 0.5rem;
+      right: 0.5rem;
+      background: #1e2230;
+      color: #fff;
+      border: none;
+      border-radius: 6px;
+      padding: 0.25rem 0.6rem;
+      font-size: 0.75rem;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 0.25rem;
+      z-index: 10;
+    }
+    .close-btn svg {
+      width: 12px !important;
+      height: 12px !important;
+      min-height: 12px !important;
+      max-height: 12px !important;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <div>
+        <h1>GRAG <span style="font-size:0.75rem; color:#a5b4fc; font-weight:normal; font-family:monospace; background:#1e2230; padding:2px 6px; border-radius:4px;">v0.1.0-alpha</span></h1>
+        <p class="subtitle" id="subtitle">Mini Semantic Search & Knowledge Graph RAG System</p>
+        <p style="font-size:0.78rem; color:#94a3b8; margin-top:0.25rem;" id="author-tag">
+          Created by <a href="https://github.com/quinc-fptu" target="_blank" rel="noopener noreferrer" style="color:#818cf8; text-decoration:none; font-weight:500;">QuiNC</a> &bull; Built in &lt; 2 hours (Experimental Prototype)
+        </p>
+      </div>
+      <div class="lang-switcher">
+        <button class="lang-btn active" id="btn-en" onclick="setLang('en')">EN</button>
+        <button class="lang-btn" id="btn-vi" onclick="setLang('vi')">VI</button>
+      </div>
+    </header>
+
+    <div class="card">
+      <h2 id="title-overview">Overview</h2>
+      <p id="text-overview" style="font-size: 0.875rem; color: #cbd5e1;">
+        A personal side project exploring a lightweight RAG system combining vector search with a knowledge graph to query uploaded documents with verifiable citations.
+      </p>
+    </div>
+
+    <div class="card">
+      <div class="card-header">
+        <h2 id="title-architecture">Architecture Flow</h2>
+        <span class="hint" id="text-expand" onclick="openModal()"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:inline-block; vertical-align:-1px; margin-right:3px;"><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/></svg>Expand Diagram</span>
+      </div>
+      <div class="mermaid" onclick="openModal()" title="Click to expand">
+        flowchart LR
+          A[Document / Query] --> B[FastAPI Backend]
+          B --> C{Chunker}
+          C --> D[Vector DB / Qdrant]
+          C --> E[Knowledge Graph]
+          D --> F[RRF Reranker]
+          E --> F
+          F --> G[SSE Stream]
+          G --> H[Next.js UI]
+      </div>
+    </div>
+
+    <div class="card">
+      <h2 id="title-howitworks">How It Works</h2>
+      <div class="grid-2">
+        <div class="box">
+          <div class="box-title" id="hw1-title">1. Ingestion & Structuring</div>
+          <p id="hw1-desc" style="color:#94a3b8;">Extracts document text, splits it using Markdown header hierarchy (`#`, `##`), and extracts entity-relationship triples via LLM.</p>
+        </div>
+        <div class="box">
+          <div class="box-title" id="hw2-title">2. Dual Retrieval</div>
+          <p id="hw2-desc" style="color:#94a3b8;">Executes dense vector search on Qdrant Cloud alongside 2-hop neighborhood expansion on the NetworkX Knowledge Graph.</p>
+        </div>
+        <div class="box">
+          <div class="box-title" id="hw3-title">3. RRF Reranking</div>
+          <p id="hw3-desc" style="color:#94a3b8;">Blends vector similarity scores with graph node weights using Reciprocal Rank Fusion (RRF) algorithm.</p>
+        </div>
+        <div class="box">
+          <div class="box-title" id="hw4-title">4. SSE Streaming & Inspection</div>
+          <p id="hw4-desc" style="color:#94a3b8;">Streams answer tokens in real-time. Citations link directly to a slide-over panel for raw chunk inspection.</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2 id="title-techstack">Core Tech Stack</h2>
+      <ul>
+        <li id="ts-1"><strong>Frontend:</strong> Next.js 15, Tailwind CSS, Lucide Icons, D3.js Force Visualizer.</li>
+        <li id="ts-2"><strong>Backend:</strong> FastAPI (Async), NetworkX Graph, SQLAlchemy.</li>
+        <li id="ts-3"><strong>Vector DB:</strong> Qdrant (Dual mode: Local file or Qdrant Cloud).</li>
+        <li id="ts-4"><strong>Inference:</strong> Local Ollama (`nomic-embed-text` embeddings, `llama3.2` LLM).</li>
+        <li id="ts-5"><strong>Orchestration:</strong> Docker Compose support included.</li>
+      </ul>
+    </div>
+
+    <div class="card">
+      <h2 id="title-endpoints">Key API Endpoints</h2>
+      <ul style="font-size:0.8rem; font-family:monospace;">
+        <li><code>POST /api/v1/documents/upload</code> — Ingest PDF/DOCX/TXT files</li>
+        <li><code>POST /api/v1/chat/stream</code> — SSE token streaming response</li>
+        <li><code>GET  /api/v1/graph/visualize</code> — Graph D3 nodes & edges JSON</li>
+        <li><code>GET  /api/v1/documents/{id}/file</code> — Raw document file stream</li>
+      </ul>
+    </div>
+
+    <div class="card">
+      <h2 id="title-links">Links & Code</h2>
+      <div class="links">
+        <a href="https://github.com/quinc-fptu/mini-graphrag" target="_blank" rel="noopener noreferrer" id="link-repo">View GitHub Repository →</a>
+        <a href="https://github.com/quinc-fptu" target="_blank" rel="noopener noreferrer" id="link-author">Author Profile (QuiNC) →</a>
+        <a href="https://github.com/quinc-fptu/mini-graphrag/blob/main/README.md" target="_blank" rel="noopener noreferrer" id="link-readme">Read README →</a>
+        <a href="https://github.com/quinc-fptu/mini-graphrag/blob/main/HANDOVER.md" target="_blank" rel="noopener noreferrer" id="link-handover">Handover Guide →</a>
+      </div>
+    </div>
+
+    <footer>
+      <p>Mini-GraphRAG &bull; Created by <a href="https://github.com/quinc-fptu" target="_blank" rel="noopener noreferrer" style="color:#a5b4fc; text-decoration:none;">QuiNC</a> &bull; CC BY-NC 4.0 (Non-Commercial)</p>
+    </footer>
+  </div>
+
+  <!-- Modal Overlay for Fullscreen Image View -->
+  <div id="diagramModal" class="modal" onclick="closeModal(event)">
+    <div class="modal-content" onclick="event.stopPropagation()">
+      <button class="close-btn" onclick="closeModal()"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:inline-block; vertical-align:-1px; margin-right:3px;"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>Close</button>
+      <div id="modalDiagramContainer"></div>
+    </div>
+  </div>
+
+  <script>
+    const i18n = {
+      en: {
+        subtitle: "Mini Semantic Search & Knowledge Graph RAG System",
+        authorTag: 'Created by <a href="https://github.com/quinc-fptu" target="_blank" style="color:#818cf8; text-decoration:none; font-weight:500;">QuiNC</a> &bull; Built in &lt; 2 hours (Experimental Prototype, minor bugs may exist)',
+        overviewTitle: "Overview",
+        overviewText: "A personal side project exploring a lightweight RAG system built in under 2 hours. It combines vector search with a knowledge graph to query uploaded documents with verifiable citations.",
+        architectureTitle: "Architecture Flow",
+        expandText: '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:inline-block; vertical-align:-1px; margin-right:3px;"><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/></svg>Expand Diagram',
+        howitworksTitle: "How It Works",
+        hw1Title: "1. Ingestion & Structuring",
+        hw1Desc: "Extracts document text, splits it using Markdown header hierarchy (#, ##), and extracts entity-relationship triples via LLM.",
+        hw2Title: "2. Dual Retrieval",
+        hw2Desc: "Executes dense vector search on Qdrant Cloud alongside 2-hop neighborhood expansion on the NetworkX Knowledge Graph.",
+        hw3Title: "3. RRF Reranking",
+        hw3Desc: "Blends vector similarity scores with graph node weights using Reciprocal Rank Fusion (RRF) algorithm.",
+        hw4Title: "4. SSE Streaming & Inspection",
+        hw4Desc: "Streams answer tokens in real-time. Citations link directly to a slide-over panel for raw chunk inspection.",
+        techstackTitle: "Core Tech Stack",
+        endpointsTitle: "Key API Endpoints",
+        linksTitle: "Links & Code",
+        linkRepo: "View GitHub Repository →",
+        linkAuthor: "Author Profile (QuiNC) →",
+        linkReadme: "Read README →",
+        linkHandover: "Handover Guide →"
+      },
+      vi: {
+        subtitle: "Hệ thống RAG thử nghiệm kết hợp Vector Search & Đồ thị tri thức",
+        authorTag: 'Tạo bởi <a href="https://github.com/quinc-fptu" target="_blank" style="color:#818cf8; text-decoration:none; font-weight:500;">QuiNC</a> &bull; Xây dựng trong &lt; 2 tiếng (Bản thử nghiệm, có thể có sai sót)',
+        overviewTitle: "Giới thiệu",
+        overviewText: "Dự án cá nhân được xây dựng nhanh trong chưa đầy 2 tiếng nhằm thử nghiệm hệ thống RAG cơ bản kết hợp giữa Vector Search (Qdrant) và Đồ thị tri thức (Knowledge Graph) với trích dẫn minh bạch.",
+        architectureTitle: "Sơ đồ Kiến trúc",
+        expandText: '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:inline-block; vertical-align:-1px; margin-right:3px;"><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/></svg>Xem ảnh phóng to',
+        howitworksTitle: "Cách thức Hoạt động",
+        hw1Title: "1. Nạp & Phân rã Văn bản",
+        hw1Desc: "Trích xuất văn bản, cắt chunk theo tiêu đề Markdown (#, ##) và rút trích các thực thể - mối quan hệ qua LLM.",
+        hw2Title: "2. Truy vấn Kép (Dual Retrieval)",
+        hw2Desc: "Thực thi tìm kiếm vector trên Qdrant Cloud song song với mở rộng đồ thị 2 bước trên NetworkX Knowledge Graph.",
+        hw3Title: "3. Xếp hạng RRF",
+        hw3Desc: "Tái xếp hạng điểm tương đồng vector và trọng số nút đồ thị bằng thuật toán Reciprocal Rank Fusion.",
+        hw4Title: "4. SSE Streaming & Trích dẫn",
+        hw4Desc: "Phản hồi chữ chạy từng từ tức thì. Trích dẫn liên kết trực tiếp tới bảng trượt Slide-over để xem văn bản gốc.",
+        techstackTitle: "Công nghệ Cốt lõi",
+        endpointsTitle: "API Endpoints Chính",
+        linksTitle: "Liên kết & Mã nguồn",
+        linkRepo: "Xem Repository trên GitHub →",
+        linkAuthor: "Trang cá nhân Tác giả (QuiNC) →",
+        linkReadme: "Xem file README →",
+        linkHandover: "Hướng dẫn Bàn giao →"
+      }
+    };
+
+    function setLang(lang) {
+      document.getElementById('btn-en').classList.toggle('active', lang === 'en');
+      document.getElementById('btn-vi').classList.toggle('active', lang === 'vi');
+      
+      const t = i18n[lang];
+      document.getElementById('subtitle').innerText = t.subtitle;
+      document.getElementById('author-tag').innerHTML = t.authorTag;
+      document.getElementById('title-overview').innerText = t.overviewTitle;
+      document.getElementById('text-overview').innerText = t.overviewText;
+      document.getElementById('title-architecture').innerText = t.architectureTitle;
+      document.getElementById('text-expand').innerHTML = t.expandText;
+      document.getElementById('title-howitworks').innerText = t.howitworksTitle;
+      document.getElementById('hw1-title').innerText = t.hw1Title;
+      document.getElementById('hw1-desc').innerText = t.hw1Desc;
+      document.getElementById('hw2-title').innerText = t.hw2Title;
+      document.getElementById('hw2-desc').innerText = t.hw2Desc;
+      document.getElementById('hw3-title').innerText = t.hw3Title;
+      document.getElementById('hw3-desc').innerText = t.hw3Desc;
+      document.getElementById('hw4-title').innerText = t.hw4Title;
+      document.getElementById('hw4-desc').innerText = t.hw4Desc;
+      document.getElementById('title-techstack').innerText = t.techstackTitle;
+      document.getElementById('title-endpoints').innerText = t.endpointsTitle;
+      document.getElementById('title-links').innerText = t.linksTitle;
+      document.getElementById('link-repo').innerText = t.linkRepo;
+      document.getElementById('link-author').innerText = t.linkAuthor;
+      document.getElementById('link-readme').innerText = t.linkReadme;
+      document.getElementById('link-handover').innerText = t.linkHandover;
+      
+      localStorage.setItem('grag_lang', lang);
+    }
+
+    function openModal() {
+      const originalSvg = document.querySelector('.mermaid svg');
+      if (!originalSvg) return;
+      const modalContainer = document.getElementById('modalDiagramContainer');
+      const clone = originalSvg.cloneNode(true);
+      clone.removeAttribute('style');
+      clone.style.width = '100%';
+      clone.style.height = 'auto';
+      clone.style.maxHeight = '80vh';
+      modalContainer.innerHTML = '';
+      modalContainer.appendChild(clone);
+      document.getElementById('diagramModal').classList.add('active');
+    }
+
+    function closeModal(event) {
+      document.getElementById('diagramModal').classList.remove('active');
+    }
+
+    window.openModal = openModal;
+    window.closeModal = closeModal;
+    window.setLang = setLang;
+
+    // Auto restore language preference
+    const savedLang = localStorage.getItem('grag_lang') || 'en';
+    setLang(savedLang);
+  </script>
+</body>
+</html>

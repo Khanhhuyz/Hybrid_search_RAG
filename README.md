@@ -1,173 +1,142 @@
-# GRAG — Mini Semantic Search + GraphRAG System
+# GRAG — Mini Semantic Search & GraphRAG System
 
-> **G**raph **R**etrieval-**A**ugmented **G**eneration — Upload documents, ask questions, visualize knowledge.
+<p align="center">
+  <img src="https://img.shields.io/badge/Status-Experimental%20%2F%20WIP-yellow?style=flat-square" alt="WIP" />
+  <img src="https://img.shields.io/badge/Python-3.11%2B-3776AB?style=flat-square&logo=python&logoColor=white" alt="Python" />
+  <img src="https://img.shields.io/badge/FastAPI-0.109-009688?style=flat-square&logo=fastapi&logoColor=white" alt="FastAPI" />
+  <img src="https://img.shields.io/badge/Next.js-15-000000?style=flat-square&logo=next.js&logoColor=white" alt="Next.js" />
+  <img src="https://img.shields.io/badge/Qdrant-Cloud-DC2626?style=flat-square&logo=qdrant&logoColor=white" alt="Qdrant" />
+  <img src="https://img.shields.io/badge/License-CC%20BY--NC%204.0-orange.svg?style=flat-square" alt="License" />
+</p>
 
-![Architecture](docs/architecture.png)
+> **Disclaimer:** This is an ongoing personal side project and **Vibe Coding** experiment exploring hybrid RAG architecture (Vector Search + Knowledge Graph). Features are continuously refined.
+
+---
 
 ## Features
 
-- 📄 **Multi-format Document Upload** — PDF, DOCX, TXT, Markdown
-- 🔍 **Semantic Search** — Vector similarity via Qdrant + Ollama embeddings
-- 🧠 **Knowledge Graph** — Auto-extracted entities & relationships via LLM
-- 🔗 **GraphRAG** — Hybrid retrieval (vector + graph) for richer answers
-- 💬 **Chat Interface** — Ask questions with citation support
-- 📊 **Graph Visualization** — Interactive D3.js graph viewer
-- ⚡ **100% Local** — Powered by Ollama (no API keys required)
+- **Document Ingestion** — Upload PDF, DOCX, TXT, and Markdown files.
+- **Header-Aware Chunking** — Splits text based on Markdown headings (`#`, `##`, `###`) while retaining section context.
+- **SSE Token Streaming** — Streams answer tokens from Ollama to the browser interface via Server-Sent Events.
+- **RRF & Graph Retrieval** — Combines vector search results and 2-hop graph node traversal using Reciprocal Rank Fusion.
+- **Document & Citation Viewer** — A slide-over panel to view document chunks, highlight cited text, and open original files.
+- **Dual Vector Storage Mode** — Supports local disk storage (`data/qdrant_storage`) or Qdrant Cloud via environment variables.
+- **Graph Visualizer** — D3.js visualization for extracted entities and relations with search and type filters.
+- **Local History** — Saves chat history in browser `localStorage`.
+- **Docker Compose Setup** — Container configuration files included for deployment.
 
 ---
 
-## Tech Stack
+## 🎨 Vibe Coding Guide (AI Pair Programming Workflow)
 
-| Layer | Technology |
-|-------|-----------|
-| Frontend | Next.js 14 + TypeScript + Tailwind CSS |
-| Backend | FastAPI (Python 3.11+) |
-| Embeddings | Ollama (`nomic-embed-text`) |
-| LLM | Ollama (`llama3.2`) |
-| Vector DB | Qdrant |
-| Graph DB | NetworkX + JSON |
-| Metadata DB | SQLite |
+This project was built iteratively using AI Pair Programming (Vibe Coding). If you want to continue extending or modifying this project with AI agents (Antigravity, Cursor, Copilot, etc.), follow these guidelines:
+
+1. **Keep Development Servers External:**
+   - Run `npm run dev` and `python -m uvicorn app.main:app` in external terminal windows rather than background AI tool calls to prevent file watcher lock collisions (`WatchFiles`/`Turbopack`).
+2. **Iterative Feature Branching:**
+   - Prompt the AI for single, modular UI or backend components (e.g., "Add slide-over drawer", "Add filter dropdown").
+3. **Verify Before Commit:**
+   - Run `npm run build` or short Python check scripts after multi-file edits before committing.
+4. **Handoff Files:**
+   - Check `.agents/doc/context-snapshot.md` and `AGENTS.md` to quickly align the AI agent on the current project state.
 
 ---
 
-## Prerequisites
+## Architecture Flow
 
-1. **Python 3.11+** — `python --version`
-2. **Node.js 18+** — `node --version`
-3. **Docker Desktop** — for Qdrant
-4. **Ollama** — [Install](https://ollama.ai)
+```mermaid
+flowchart TD
+    A[Document / Query] --> B[FastAPI Backend]
+    B --> C{Chunker & Extractor}
+    C --> D[Nomic Embed Text / Ollama]
+    C --> E[Entity Extractor / llama3.2]
+    D --> F[(Qdrant Vector DB)]
+    E --> G[(NetworkX Knowledge Graph)]
+    F --> H[RRF Reranker]
+    G --> H
+    H --> I[SSE Stream Response]
+    I --> J[Next.js Frontend]
+```
 
 ---
 
 ## Quick Start
 
-### 1. Start Qdrant
+### Prerequisites
 
-```bash
-docker compose up -d qdrant
-```
+- **Python 3.11+**
+- **Node.js 20+**
+- **Ollama** ([Installation guide](https://ollama.ai))
 
-### 2. Pull Ollama Models
+### 1. Pull Models
 
 ```bash
 ollama pull nomic-embed-text
 ollama pull llama3.2
 ```
 
-### 3. Backend Setup
+### 2. Backend Setup
 
-```powershell
+```bash
 cd backend
 python -m venv .venv
-.venv\Scripts\Activate.ps1
+
+# Activate virtual environment
+# Windows: .\.venv\Scripts\Activate.ps1
+# Linux/macOS: source .venv/bin/activate
+
 pip install -r requirements.txt
-cp .env.example .env
-uvicorn app.main:app --reload --port 8000
+python -m uvicorn app.main:app --port 8000 --reload
 ```
 
-Backend runs at: http://localhost:8000  
-API docs: http://localhost:8000/docs
+### 3. Frontend Setup
 
-### 4. Frontend Setup
-
-```powershell
+```bash
 cd frontend
 npm install
 npm run dev
 ```
 
-Frontend runs at: http://localhost:3000
+Open `http://localhost:3000` in your browser.
 
 ---
 
-## API Reference
+## Docker Setup
 
-### Documents
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| POST | `/api/v1/documents/upload` | Upload a document |
-| GET | `/api/v1/documents/` | List all documents |
-| GET | `/api/v1/documents/{id}` | Get document details |
-| DELETE | `/api/v1/documents/{id}` | Delete document |
-| GET | `/api/v1/documents/{id}/status` | Processing status |
-
-### Search & Chat
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| POST | `/api/v1/search/semantic` | Semantic vector search |
-| POST | `/api/v1/search/graph` | Knowledge graph search |
-| POST | `/api/v1/chat` | GraphRAG chat with citations |
-
-### Graph
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | `/api/v1/graph/visualize` | Full graph for visualization |
-| POST | `/api/v1/graph/entity/query` | Query entity neighborhood |
-| GET | `/api/v1/graph/entities` | List all entities |
-| GET | `/api/v1/graph/relationships` | List all relationships |
-| GET | `/api/v1/graph/stats` | Graph statistics |
+```bash
+docker compose up -d
+```
 
 ---
 
 ## Project Structure
 
-```
+```text
 GRAG/
 ├── backend/
 │   ├── app/
-│   │   ├── main.py               # FastAPI app
-│   │   ├── config.py             # Settings
-│   │   ├── database.py           # SQLite models
-│   │   ├── schemas.py            # Pydantic schemas
-│   │   ├── dependencies.py       # DI container
-│   │   ├── api/
-│   │   │   ├── documents.py
-│   │   │   ├── search.py
-│   │   │   └── graph.py
-│   │   └── services/
-│   │       ├── document_processor.py
-│   │       ├── chunker.py
-│   │       ├── embedder.py
-│   │       ├── vector_store.py
-│   │       ├── graph_builder.py
-│   │       └── rag_pipeline.py
-│   ├── requirements.txt
-│   └── .env.example
+│   │   ├── api/          # Document, search, and graph routes
+│   │   ├── services/     # Chunker, RAG pipeline, vector store, graph builder
+│   │   └── main.py       # FastAPI application
+│   ├── Dockerfile
+│   └── requirements.txt
 ├── frontend/
-│   └── src/
-│       ├── app/
-│       │   ├── page.tsx          # Dashboard
-│       │   ├── chat/page.tsx     # Chat interface
-│       │   └── graph/page.tsx    # Graph visualization
-│       ├── components/
-│       └── lib/
-├── data/                         # Auto-created
-│   ├── uploads/
-│   ├── grag.db
-│   └── knowledge_graph.json
+│   ├── src/
+│   │   ├── app/          # Dashboard, chat, search, graph pages
+│   │   ├── components/   # UI components (DocumentDrawer, GraphVisualizer)
+│   │   └── lib/          # API client
+│   ├── Dockerfile
+│   └── package.json
+├── scripts/
+│   └── migrate_to_cloud.py  # Local to Qdrant Cloud migration script
 ├── docker-compose.yml
+├── HANDOVER.md
+├── LICENSE
 └── README.md
-```
-
----
-
-## Configuration
-
-Edit `backend/.env` to customize:
-
-```bash
-EMBEDDING_MODEL=nomic-embed-text   # or mxbai-embed-large
-LLM_MODEL=llama3.2                 # or qwen2.5, mistral, etc.
-CHUNK_SIZE=512
-CHUNK_OVERLAP=64
-SIMILARITY_THRESHOLD=0.6
 ```
 
 ---
 
 ## License
 
-MIT
+CC BY-NC 4.0 License (Non-Commercial). See [LICENSE](LICENSE) for details.
