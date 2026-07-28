@@ -2,8 +2,8 @@
 
 import { useEffect, useRef, useState } from "react";
 import * as d3 from "d3";
-import { GraphData, GraphNode, GraphEdge } from "@/lib/api";
-import { ZoomIn, ZoomOut, RefreshCw } from "lucide-react";
+import { GraphData, GraphNode } from "@/lib/api";
+import { Search } from "lucide-react";
 
 // Entity type → color mapping
 const TYPE_COLORS: Record<string, string> = {
@@ -20,6 +20,7 @@ interface GraphVisualizerProps {
   data: GraphData;
   width?: number;
   height?: number;
+  highlightEntity?: string;
 }
 
 interface D3Node extends d3.SimulationNodeDatum, GraphNode {
@@ -34,9 +35,11 @@ interface D3Link extends d3.SimulationLinkDatum<D3Node> {
   weight: number;
 }
 
-export function GraphVisualizer({ data, width = 800, height = 600 }: GraphVisualizerProps) {
+export function GraphVisualizer({ data, width = 800, height = 600, highlightEntity }: GraphVisualizerProps) {
   const svgRef = useRef<SVGSVGElement>(null);
   const [selected, setSelected] = useState<D3Node | null>(null);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [typeFilter, setTypeFilter]   = useState("ALL");
 
   useEffect(() => {
     if (!svgRef.current || !data.nodes.length) return;
@@ -44,14 +47,24 @@ export function GraphVisualizer({ data, width = 800, height = 600 }: GraphVisual
     const svg = d3.select(svgRef.current);
     svg.selectAll("*").remove();
 
+    // Filter nodes based on user search & type selection
+    const filteredNodesData = data.nodes.filter((n) => {
+      const matchesSearch = !searchQuery || n.label.toLowerCase().includes(searchQuery.toLowerCase());
+      const matchesType   = typeFilter === "ALL" || n.type === typeFilter;
+      return matchesSearch && matchesType;
+    });
+
+    const validNodeIds = new Set(filteredNodesData.map((n) => n.id));
+
     const nodeMap = new Map<string, D3Node>();
-    const nodes: D3Node[] = data.nodes.map((n) => {
+    const nodes: D3Node[] = filteredNodesData.map((n) => {
       const d: D3Node = { ...n };
       nodeMap.set(n.id, d);
       return d;
     });
 
     const links: D3Link[] = data.edges
+      .filter((e) => validNodeIds.has(e.source) && validNodeIds.has(e.target))
       .map((e) => {
         const src = nodeMap.get(e.source);
         const tgt = nodeMap.get(e.target);
@@ -64,9 +77,9 @@ export function GraphVisualizer({ data, width = 800, height = 600 }: GraphVisual
     const simulation = d3
       .forceSimulation<D3Node>(nodes)
       .force("link", d3.forceLink<D3Node, D3Link>(links).id((d) => d.id).distance(80))
-      .force("charge", d3.forceManyBody().strength(-200))
+      .force("charge", d3.forceManyBody().strength(-220))
       .force("center", d3.forceCenter(width / 2, height / 2))
-      .force("collision", d3.forceCollide(30));
+      .force("collision", d3.forceCollide(32));
 
     // ── Container with zoom ────────────────────────────────────────────────
     const zoom = d3.zoom<SVGSVGElement, unknown>().scaleExtent([0.2, 4]).on("zoom", (event) => {
@@ -125,12 +138,12 @@ export function GraphVisualizer({ data, width = 800, height = 600 }: GraphVisual
       .on("click", (_, d) => setSelected((prev) => prev?.id === d.id ? null : d));
 
     node.append("circle")
-      .attr("r", 14)
+      .attr("r", (d) => (highlightEntity && d.label.toLowerCase().includes(highlightEntity.toLowerCase()) ? 18 : 14))
       .attr("fill", (d) => TYPE_COLORS[d.type] || "#64748b")
-      .attr("fill-opacity", 0.85)
-      .attr("stroke", (d) => TYPE_COLORS[d.type] || "#64748b")
-      .attr("stroke-width", 2)
-      .attr("stroke-opacity", 0.4);
+      .attr("fill-opacity", 0.9)
+      .attr("stroke", (d) => (highlightEntity && d.label.toLowerCase().includes(highlightEntity.toLowerCase()) ? "#ffffff" : TYPE_COLORS[d.type] || "#64748b"))
+      .attr("stroke-width", (d) => (highlightEntity && d.label.toLowerCase().includes(highlightEntity.toLowerCase()) ? 3 : 2))
+      .attr("stroke-opacity", 0.8);
 
     node.append("text")
       .attr("dy", "0.35em")
@@ -163,10 +176,34 @@ export function GraphVisualizer({ data, width = 800, height = 600 }: GraphVisual
     });
 
     return () => { simulation.stop(); };
-  }, [data, width, height]);
+  }, [data, width, height, searchQuery, typeFilter, highlightEntity]);
 
   return (
-    <div className="relative w-full h-full">
+    <div className="relative w-full h-full flex flex-col">
+      {/* Search & Filter bar */}
+      <div className="absolute top-3 left-3 z-10 flex items-center gap-2 bg-[#12141c]/90 border border-zinc-800 rounded-lg p-1.5 backdrop-blur-md">
+        <div className="relative flex items-center">
+          <Search size={13} className="absolute left-2.5 text-zinc-500" />
+          <input
+            type="text"
+            placeholder="Search entity..."
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            className="bg-zinc-900 border border-zinc-800 text-xs text-zinc-200 rounded pl-7 pr-2.5 py-1 w-36 focus:outline-none focus:border-zinc-700"
+          />
+        </div>
+        <select
+          value={typeFilter}
+          onChange={(e) => setTypeFilter(e.target.value)}
+          className="bg-zinc-900 border border-zinc-800 text-xs text-zinc-400 rounded px-2 py-1 focus:outline-none cursor-pointer"
+        >
+          <option value="ALL">All Types</option>
+          {Object.keys(TYPE_COLORS).map((t) => (
+            <option key={t} value={t}>{t}</option>
+          ))}
+        </select>
+      </div>
+
       <svg ref={svgRef} width={width} height={height} className="w-full h-full" />
 
       {/* Legend */}
@@ -181,12 +218,15 @@ export function GraphVisualizer({ data, width = 800, height = 600 }: GraphVisual
 
       {/* Selected node info */}
       {selected && (
-        <div className="absolute bottom-3 left-3 glass rounded-lg p-3 text-xs max-w-[200px] animate-fade-in">
+        <div className="absolute bottom-3 left-3 glass rounded-lg p-3 text-xs max-w-[220px] animate-fade-in space-y-1">
           <p className="font-semibold text-zinc-100">{selected.label}</p>
-          <p className="text-zinc-500 mt-0.5">{selected.type}</p>
-          <p className="text-zinc-600 mt-1">{selected.document_ids?.length ?? 0} source(s)</p>
+          <span className="inline-block px-2 py-0.5 rounded text-[10px] bg-indigo-500/20 text-indigo-300 font-mono">
+            {selected.type}
+          </span>
+          <p className="text-zinc-500 text-[11px] mt-1">{selected.document_ids?.length ?? 0} source document(s)</p>
         </div>
       )}
     </div>
   );
 }
+

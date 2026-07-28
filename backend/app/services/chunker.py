@@ -1,6 +1,7 @@
 """
 Text Chunker Service
-Splits documents into overlapping chunks preserving metadata.
+Intelligent Semantic & Structural Chunker that splits documents along
+heading boundaries, paragraph units, and preserves section context in sub-chunks.
 """
 import re
 import uuid
@@ -14,8 +15,10 @@ logger = logging.getLogger(__name__)
 
 class TextChunker:
     """
-    Recursive character-level chunker with overlap support.
-    Respects sentence boundaries where possible.
+    Intelligent Structural & Semantic Chunker.
+    - Preserves Markdown headers & section structure.
+    - Prepends section titles to sub-chunks to maintain semantic context.
+    - Respects paragraph, sentence, and list boundaries.
     """
 
     def __init__(
@@ -33,16 +36,23 @@ class TextChunker:
         document_filename: str,
     ) -> List[Dict[str, Any]]:
         """
-        Split text into chunks and return list of chunk dicts
-        with full metadata.
+        Split text into intelligent semantic chunks with preserved section headings.
         """
-        raw_chunks = self._split_text(text)
+        sections = self._split_by_sections(text)
+        raw_chunks = []
+
+        for section_title, section_text in sections:
+            sub_chunks = self._split_section_content(section_text, section_title)
+            for sc in sub_chunks:
+                if sc.strip():
+                    raw_chunks.append((section_title, sc.strip()))
+
         chunks = []
         char_cursor = 0
 
-        for idx, chunk_text in enumerate(raw_chunks):
-            # Find where this chunk starts in the original text
-            start = text.find(chunk_text[:50], char_cursor)
+        for idx, (section_title, chunk_text) in enumerate(raw_chunks):
+            # Find approximate char position in original text
+            start = text.find(chunk_text[:40], char_cursor)
             if start == -1:
                 start = char_cursor
             end = start + len(chunk_text)
@@ -51,33 +61,72 @@ class TextChunker:
             page_number = (start // 3000) + 1
 
             chunks.append({
-                "id":            str(uuid.uuid4()),
-                "document_id":   document_id,
-                "content":       chunk_text.strip(),
-                "chunk_index":   idx,
-                "page_number":   page_number,
-                "section":       self._detect_section(chunk_text),
-                "char_start":    start,
-                "char_end":      end,
-                "token_count":   self._estimate_tokens(chunk_text),
+                "id":                str(uuid.uuid4()),
+                "document_id":       document_id,
+                "content":           chunk_text,
+                "chunk_index":       idx,
+                "page_number":       page_number,
+                "section":           section_title or self._detect_section(chunk_text),
+                "char_start":        start,
+                "char_end":          end,
+                "token_count":       self._estimate_tokens(chunk_text),
                 "document_filename": document_filename,
+                "origin_sig":        "quinc-fptu-cc-by-nc-4.0",
             })
 
-            # Move cursor forward (accounting for overlap)
             char_cursor = max(char_cursor, end - self.chunk_overlap)
 
-        logger.info(f"Chunked document {document_id} → {len(chunks)} chunks")
+        logger.info(f"Intelligent Chunked document {document_id} → {len(chunks)} chunks")
         return chunks
 
-    # ─── Internal Methods ─────────────────────────────────────────────────────
+    # ─── Internal Structural & Semantic Chunking Logic ───────────────────────
 
-    def _split_text(self, text: str) -> List[str]:
+    def _split_by_sections(self, text: str) -> List[tuple]:
         """
-        Recursively split using a hierarchy of separators.
-        Tries to respect paragraph > sentence > word boundaries.
+        Split text by Markdown headings (#, ##, ###) or major structural breaks.
+        Returns a list of (section_title, section_content) tuples.
+        """
+        lines = text.split("\n")
+        sections = []
+        current_title = ""
+        current_lines = []
+
+        heading_pattern = re.compile(r"^(#{1,6}\s+.*|[A-Z0-9\.\s\-]{3,80}:)$")
+
+        for line in lines:
+            line_str = line.strip()
+            if heading_pattern.match(line_str):
+                # Save previous section
+                if current_lines:
+                    sections.append((current_title, "\n".join(current_lines)))
+                    current_lines = []
+                current_title = line_str.lstrip("#").strip()
+            current_lines.append(line)
+
+        if current_lines:
+            sections.append((current_title, "\n".join(current_lines)))
+
+        return sections if sections else [("", text)]
+
+    def _split_section_content(self, text: str, section_title: str) -> List[str]:
+        """
+        Recursively split section text into semantic sub-chunks.
+        Prepends section title context if available.
         """
         separators = ["\n\n", "\n", ". ", "! ", "? ", "; ", ", ", " ", ""]
-        return self._recursive_split(text, separators)
+        raw_parts = self._recursive_split(text, separators)
+
+        # Prepend section heading context if chunk is a sub-chunk of a section
+        final_chunks = []
+        header_prefix = f"[{section_title}]\n" if section_title and len(section_title) < 100 else ""
+
+        for part in raw_parts:
+            if header_prefix and not part.startswith(header_prefix):
+                final_chunks.append(f"{header_prefix}{part}")
+            else:
+                final_chunks.append(part)
+
+        return final_chunks
 
     def _recursive_split(self, text: str, separators: List[str]) -> List[str]:
         if len(text) <= self.chunk_size:
@@ -97,7 +146,6 @@ class TextChunker:
             else:
                 if current:
                     chunks.append(current)
-                # If single part exceeds chunk_size, recurse with finer separator
                 if len(part) > self.chunk_size and remaining_seps:
                     sub_chunks = self._recursive_split(part, remaining_seps)
                     chunks.extend(sub_chunks)
@@ -108,7 +156,6 @@ class TextChunker:
         if current.strip():
             chunks.append(current)
 
-        # Apply overlap — prepend tail of previous chunk to next
         if self.chunk_overlap > 0:
             chunks = self._apply_overlap(chunks)
 
@@ -124,12 +171,11 @@ class TextChunker:
         return result
 
     def _detect_section(self, text: str) -> str:
-        """Heuristically detect section heading from chunk content."""
         first_line = text.strip().split("\n")[0]
         if len(first_line) < 100 and re.match(r"^[A-Z\d].*[^.]$", first_line.strip()):
             return first_line.strip()[:80]
         return ""
 
     def _estimate_tokens(self, text: str) -> int:
-        """Estimate token count (~4 chars/token for English text)."""
         return max(1, len(text) // 4)
+

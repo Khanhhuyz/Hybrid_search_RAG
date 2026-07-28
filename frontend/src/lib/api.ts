@@ -166,6 +166,9 @@ export const documentsApi = {
 
   status: (id: string): Promise<Pick<Document, "id" | "status" | "chunk_count" | "entity_count" | "error_message">> =>
     request(`/documents/${id}/status`),
+
+  getChunks: (id: string): Promise<{ document_id: string; filename: string; total_chunks: number; chunks: ChunkResult[] }> =>
+    request(`/documents/${id}/chunks`),
 };
 
 // ─── Search API ───────────────────────────────────────────────────────────────
@@ -209,6 +212,69 @@ export const chatApi = {
         document_ids: documentIds,
       }),
     }),
+
+  streamAsk: async (
+    question: string,
+    history: ChatMessage[] = [],
+    useGraph = true,
+    topK = 5,
+    documentIds: string[] | undefined,
+    onMetadata: (metadata: Partial<ChatResponse>) => void,
+    onToken: (token: string) => void,
+    onError: (error: string) => void
+  ): Promise<void> => {
+    const url = `${API_BASE}/chat/stream`;
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        question,
+        history,
+        use_graph: useGraph,
+        top_k: topK,
+        document_ids: documentIds,
+      }),
+    });
+
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({ detail: response.statusText }));
+      throw new Error(err.detail || `Stream failed: HTTP ${response.status}`);
+    }
+
+    const reader = response.body?.getReader();
+    if (!reader) throw new Error("Response body reader not available");
+
+    const decoder = new TextDecoder();
+    let buffer = "";
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n\n");
+      buffer = lines.pop() || "";
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (trimmed.startsWith("data: ")) {
+          const jsonStr = trimmed.replace("data: ", "");
+          try {
+            const parsed = JSON.parse(jsonStr);
+            if (parsed.type === "metadata") {
+              onMetadata(parsed.data);
+            } else if (parsed.type === "token") {
+              onToken(parsed.data.text);
+            } else if (parsed.type === "error") {
+              onError(parsed.data.error);
+            }
+          } catch {
+            // Ignore parse errors
+          }
+        }
+      }
+    }
+  },
 };
 
 // ─── Graph API ────────────────────────────────────────────────────────────────

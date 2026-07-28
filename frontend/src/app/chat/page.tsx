@@ -2,8 +2,9 @@
 
 import { useState, useRef, useEffect } from "react";
 import { chatApi, ChatMessage, ChatResponse, Citation } from "@/lib/api";
+import { DocumentDrawer } from "@/components/documents/DocumentDrawer";
 import {
-  Send, Bot, User, BookOpen, Share2, Loader2, Sparkles, AlertCircle
+  Send, Bot, User, BookOpen, Share2, Loader2, Sparkles, AlertCircle, Trash2, ExternalLink
 } from "lucide-react";
 
 interface Message {
@@ -15,24 +16,64 @@ interface Message {
   loading?: boolean;
 }
 
+const STORAGE_KEY = "grag_chat_history_v1";
+
 export default function ChatPage() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput]       = useState("");
   const [useGraph, setUseGraph] = useState(true);
   const [topK, setTopK]         = useState(5);
   const [thinking, setThinking] = useState(false);
+
+  // Drawer state for citation viewing
+  const [activeDrawerDoc, setActiveDrawerDoc] = useState<{
+    documentId: string;
+    filename: string;
+    chunkId?: string;
+  } | null>(null);
+
   const bottomRef = useRef<HTMLDivElement>(null);
+
+  // Load chat history from localStorage on mount
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem(STORAGE_KEY);
+      if (saved) {
+        setMessages(JSON.parse(saved));
+      }
+    } catch {
+      // Ignore storage errors
+    }
+  }, []);
+
+  // Save chat history to localStorage whenever messages update
+  useEffect(() => {
+    if (messages.length > 0) {
+      try {
+        const cleanMessages = messages.filter((m) => !m.loading);
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(cleanMessages));
+      } catch {
+        // Ignore storage errors
+      }
+    }
+  }, [messages]);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
+
+  const clearHistory = () => {
+    setMessages([]);
+    localStorage.removeItem(STORAGE_KEY);
+  };
 
   const sendMessage = async () => {
     const question = input.trim();
     if (!question || thinking) return;
 
     const userMsg: Message = { id: Date.now().toString(), role: "user", content: question };
-    const botMsg:  Message = { id: (Date.now() + 1).toString(), role: "assistant", content: "", loading: true };
+    const botMsgId = (Date.now() + 1).toString();
+    const botMsg:  Message = { id: botMsgId, role: "assistant", content: "", loading: true };
 
     setMessages((prev) => [...prev, userMsg, botMsg]);
     setInput("");
@@ -45,19 +86,60 @@ export default function ChatPage() {
       .map((m) => ({ role: m.role, content: m.content }));
 
     try {
-      const resp = await chatApi.ask(question, history, useGraph, topK);
-      setMessages((prev) =>
-        prev.map((m) =>
-          m.id === botMsg.id
-            ? { ...m, content: resp.answer, response: resp, loading: false }
-            : m
-        )
+      await chatApi.streamAsk(
+        question,
+        history,
+        useGraph,
+        topK,
+        undefined,
+        (metadata) => {
+          // Received metadata (citations, graph context, retrieval mode)
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === botMsgId
+                ? {
+                    ...m,
+                    loading: false,
+                    response: {
+                      question: metadata.question || question,
+                      answer: "",
+                      citations: metadata.citations || [],
+                      graph_context: metadata.graph_context,
+                      semantic_chunks_used: metadata.semantic_chunks_used || 0,
+                      graph_nodes_used: metadata.graph_nodes_used || 0,
+                      model_used: metadata.model_used || "",
+                      retrieval_mode: metadata.retrieval_mode || "hybrid",
+                    },
+                  }
+                : m
+            )
+          );
+        },
+        (token) => {
+          // Received streaming token chunk
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === botMsgId
+                ? { ...m, content: m.content + token, loading: false }
+                : m
+            )
+          );
+        },
+        (error) => {
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === botMsgId
+                ? { ...m, error, loading: false }
+                : m
+            )
+          );
+        }
       );
     } catch (e: unknown) {
       const errMsg = e instanceof Error ? e.message : "Failed to get response";
       setMessages((prev) =>
         prev.map((m) =>
-          m.id === botMsg.id
+          m.id === botMsgId
             ? { ...m, content: "", error: errMsg, loading: false }
             : m
         )
@@ -96,6 +178,16 @@ export default function ChatPage() {
               {[3, 5, 8, 10].map((k) => <option key={k} value={k}>{k}</option>)}
             </select>
           </label>
+          {messages.length > 0 && (
+            <button
+              onClick={clearHistory}
+              title="Clear chat history"
+              className="flex items-center gap-1.5 px-2.5 py-1 rounded bg-zinc-900 border border-zinc-800 hover:border-rose-900/50 text-zinc-400 hover:text-rose-400 text-xs transition-all"
+            >
+              <Trash2 size={13} />
+              Clear
+            </button>
+          )}
         </div>
       </div>
 
@@ -183,7 +275,18 @@ export default function ChatPage() {
                       </summary>
                       <div className="mt-2 space-y-1.5">
                         {msg.response.citations.map((c, i) => (
-                          <CitationCard key={i} citation={c} index={i + 1} />
+                          <CitationCard
+                            key={i}
+                            citation={c}
+                            index={i + 1}
+                            onClick={() =>
+                              setActiveDrawerDoc({
+                                documentId: c.document_id,
+                                filename: c.document_filename,
+                                chunkId: c.chunk_id,
+                              })
+                            }
+                          />
                         ))}
                       </div>
                     </details>
@@ -224,15 +327,39 @@ export default function ChatPage() {
         </div>
         <p className="text-center text-xs text-zinc-700 mt-2">Shift+Enter for new line · Enter to send</p>
       </div>
+
+      {/* Slide-over Drawer for Citation & Document Inspection */}
+      {activeDrawerDoc && (
+        <DocumentDrawer
+          documentId={activeDrawerDoc.documentId}
+          documentFilename={activeDrawerDoc.filename}
+          highlightChunkId={activeDrawerDoc.chunkId}
+          onClose={() => setActiveDrawerDoc(null)}
+        />
+      )}
     </div>
   );
 }
 
-function CitationCard({ citation, index }: { citation: Citation; index: number }) {
+function CitationCard({
+  citation,
+  index,
+  onClick,
+}: {
+  citation: Citation;
+  index: number;
+  onClick?: () => void;
+}) {
   return (
-    <div className="glass rounded-lg p-2.5 text-xs space-y-1">
+    <div
+      onClick={onClick}
+      className="glass rounded-lg p-2.5 text-xs space-y-1 cursor-pointer hover:border-indigo-500/50 transition-all group/card"
+    >
       <div className="flex items-center justify-between gap-2">
-        <span className="font-medium text-zinc-300">[{index}] {citation.document_filename}</span>
+        <span className="font-medium text-zinc-300 group-hover/card:text-indigo-300 flex items-center gap-1.5">
+          [{index}] {citation.document_filename}
+          <ExternalLink size={10} className="opacity-0 group-hover/card:opacity-100 transition-opacity text-indigo-400" />
+        </span>
         <span className="text-zinc-500">{(citation.relevance_score * 100).toFixed(0)}%</span>
       </div>
       {citation.page_number && <span className="text-zinc-600">Page {citation.page_number}</span>}

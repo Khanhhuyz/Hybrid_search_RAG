@@ -112,7 +112,7 @@ async def chat(
     request: ChatRequest,
     rag: RAGPipeline = Depends(get_rag_pipeline),
 ):
-    """Ask a question using the full GraphRAG pipeline."""
+    """Ask a question using the full GraphRAG pipeline (non-streaming)."""
     try:
         result = await rag.answer(
             question=request.question,
@@ -153,3 +153,34 @@ async def chat(
     except Exception as e:
         logger.error(f"Chat error: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"RAG pipeline error: {str(e)}")
+
+
+@router.post("/chat/stream")
+async def chat_stream(
+    request: ChatRequest,
+    rag: RAGPipeline = Depends(get_rag_pipeline),
+):
+    """Ask a question using GraphRAG with real-time SSE token streaming."""
+    from fastapi.responses import StreamingResponse
+
+    try:
+        generator = rag.answer_stream(
+            question=request.question,
+            top_k=request.top_k,
+            use_graph=request.use_graph,
+            document_ids=request.document_ids,
+            history=request.history,
+        )
+        return StreamingResponse(
+            generator,
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
+    except Exception as e:
+        logger.error(f"Chat stream error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"RAG streaming error: {str(e)}")
+

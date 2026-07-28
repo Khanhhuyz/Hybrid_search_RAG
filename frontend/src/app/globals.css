@@ -76,6 +76,16 @@ body {
   animation: fade-in 0.3s ease-out;
 }
 
+/* Slide-left animation for drawers */
+@keyframes slide-left {
+  from { transform: translateX(100%); }
+  to { transform: translateX(0); }
+}
+
+.animate-slide-left {
+  animation: slide-left 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
 /* Shine animation for upload area */
 @keyframes shimmer {
   0% { background-position: -200% 0; }

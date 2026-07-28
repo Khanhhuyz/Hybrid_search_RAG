@@ -35,21 +35,33 @@ class EmbedderService:
 
     async def embed_batch(self, texts: List[str]) -> List[List[float]]:
         """
-        Embed a list of texts.
-        Ollama processes embeddings one-at-a-time, so we batch sequentially.
+        Embed a list of texts concurrently using an asyncio Semaphore to avoid overloading Ollama.
         """
-        embeddings = []
-        for i, text in enumerate(texts):
-            try:
-                emb = await self.embed_text(text)
-                embeddings.append(emb)
-                if (i + 1) % 10 == 0:
-                    logger.info(f"Embedded {i + 1}/{len(texts)} chunks")
-            except Exception as e:
-                logger.error(f"Embedding failed for chunk {i}: {e}")
-                # Use zero vector as fallback to not break the batch
-                embeddings.append([0.0] * settings.EMBEDDING_DIMENSION)
-        return embeddings
+        import asyncio
+        
+        # Semaphore limits concurrent requests to Ollama (typically 5 works great locally)
+        semaphore = asyncio.Semaphore(5)
+
+        async def _embed_with_sem(text: str, index: int) -> tuple[int, List[float]]:
+            async with semaphore:
+                try:
+                    emb = await self.embed_text(text)
+                    return index, emb
+                except Exception as e:
+                    logger.error(f"Embedding failed for chunk {index}: {e}")
+                    return index, [0.0] * settings.EMBEDDING_DIMENSION
+
+        tasks = [_embed_with_sem(text, i) for i, text in enumerate(texts)]
+        
+        # Monitor chunk completion progress in logs
+        logger.info(f"Starting concurrent embedding of {len(texts)} chunks...")
+        results = await asyncio.gather(*tasks)
+        
+        # Sort results by original index to preserve order
+        results.sort(key=lambda x: x[0])
+        logger.info(f"Successfully embedded all {len(texts)} chunks.")
+        
+        return [emb for _, emb in results]
 
     async def embed_query(self, query: str) -> List[float]:
         """Embed a user query (same as text embedding with nomic-embed-text)."""

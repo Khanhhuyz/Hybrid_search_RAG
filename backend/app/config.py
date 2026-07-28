@@ -40,6 +40,8 @@ class Settings(BaseSettings):
     # ─── Qdrant ───────────────────────────────────────────────────────
     QDRANT_PATH: Path = BASE_DIR / "data" / "qdrant_storage"
     QDRANT_COLLECTION: str = "grag_chunks"
+    QDRANT_URL: Optional[str] = None
+    QDRANT_API_KEY: Optional[str] = None
 
     # ─── Knowledge Graph ──────────────────────────────────────────────
     GRAPH_FILE: Path = BASE_DIR / "data" / "knowledge_graph.json"

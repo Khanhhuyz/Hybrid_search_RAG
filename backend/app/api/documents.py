@@ -5,6 +5,7 @@ Handles file upload, listing, retrieval, and deletion.
 import shutil
 import uuid
 import logging
+import asyncio
 from pathlib import Path
 from typing import Optional, List
 
@@ -153,18 +154,49 @@ async def delete_document(
     await db.commit()
 
 
-# ─── Processing Status ────────────────────────────────────────────────────────
+# ─── Document Chunks ─────────────────────────────────────────────────────────
 
-@router.get("/{doc_id}/status")
-async def get_processing_status(doc_id: str, db: AsyncSession = Depends(get_db)):
+@router.get("/{doc_id}/chunks")
+async def get_document_chunks(doc_id: str, db: AsyncSession = Depends(get_db)):
+    """Fetch all stored chunks for a specific document."""
     doc = await _get_doc_or_404(db, doc_id)
+    result = await db.execute(
+        select(ChunkModel)
+        .where(ChunkModel.document_id == doc_id)
+        .order_by(ChunkModel.chunk_index.asc())
+    )
+    chunks = result.scalars().all()
     return {
-        "id": doc.id,
-        "status": doc.status,
-        "chunk_count": doc.chunk_count,
-        "entity_count": doc.entity_count,
-        "error_message": doc.error_message,
+        "document_id": doc.id,
+        "filename": doc.original_name,
+        "total_chunks": len(chunks),
+        "chunks": [
+            {
+                "id": c.id,
+                "chunk_index": c.chunk_index,
+                "content": c.content,
+                "page_number": c.page_number,
+                "section": c.section,
+            }
+            for c in chunks
+        ],
     }
+
+
+# ─── Raw Document File Stream ──────────────────────────────────────────────────
+
+from fastapi.responses import FileResponse
+
+@router.get("/{doc_id}/file")
+async def get_document_file(doc_id: str, db: AsyncSession = Depends(get_db)):
+    """Serve the raw original document file (PDF, TXT, MD, DOCX)."""
+    doc = await _get_doc_or_404(db, doc_id)
+    file_path = Path(doc.file_path)
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="File not found on disk")
+    
+    media_type = "application/pdf" if doc.file_type == "pdf" else "text/plain"
+    return FileResponse(path=file_path, filename=doc.original_name, media_type=media_type)
 
 
 # ─── Background Processing Task ───────────────────────────────────────────────
@@ -192,12 +224,12 @@ async def _process_document(
             )
             await db.commit()
 
-            # ── Extract Text ───────────────────────────────────────────────
-            raw_text  = processor.extract_text(file_path, file_type)
+            # ── Extract Text & Chunk (in threadpool to avoid blocking event loop) ──
+            raw_text = await asyncio.to_thread(processor.extract_text, file_path, file_type)
             clean_text = processor.normalize(raw_text)
 
             # ── Chunk ──────────────────────────────────────────────────────
-            chunks = chunker.chunk_document(clean_text, doc_id, original_name)
+            chunks = await asyncio.to_thread(chunker.chunk_document, clean_text, doc_id, original_name)
             if not chunks:
                 raise ValueError("No text could be extracted from the document")
 

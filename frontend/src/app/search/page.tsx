@@ -2,7 +2,8 @@
 
 import { useState } from "react";
 import { searchApi, SearchResponse } from "@/lib/api";
-import { Search, Loader2, FileText, Hash, BarChart2, Share2 } from "lucide-react";
+import { DocumentDrawer } from "@/components/documents/DocumentDrawer";
+import { Search, Loader2, FileText, Hash, BarChart2, Share2, ExternalLink } from "lucide-react";
 
 type SearchMode = "semantic" | "graph";
 
@@ -13,6 +14,13 @@ export default function SearchPage() {
   const [loading, setLoading]     = useState(false);
   const [results, setResults]     = useState<SearchResponse | null>(null);
   const [error, setError]         = useState<string | null>(null);
+
+  // Drawer state
+  const [activeDrawerDoc, setActiveDrawerDoc] = useState<{
+    documentId: string;
+    filename: string;
+    chunkId?: string;
+  } | null>(null);
 
   const handleSearch = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -115,11 +123,24 @@ export default function SearchPage() {
 
           <div className="space-y-3">
             {results.results.map((result, i) => (
-              <div key={result.chunk.id} className="glass rounded-xl p-4 space-y-2 hover:border-indigo-500/20 transition-all animate-fade-in">
+              <div
+                key={result.chunk.id || i}
+                onClick={() =>
+                  setActiveDrawerDoc({
+                    documentId: result.chunk.document_id,
+                    filename: result.document_filename,
+                    chunkId: result.chunk.id,
+                  })
+                }
+                className="glass rounded-xl p-4 space-y-2 hover:border-indigo-500/50 cursor-pointer transition-all animate-fade-in group/card"
+              >
                 <div className="flex items-start justify-between gap-3">
                   <div className="flex items-center gap-2 text-xs text-zinc-500">
                     <FileText size={12} />
-                    <span className="text-zinc-400 font-medium">{result.document_filename}</span>
+                    <span className="text-zinc-400 font-medium group-hover/card:text-indigo-300 flex items-center gap-1">
+                      {result.document_filename}
+                      <ExternalLink size={10} className="opacity-0 group-hover/card:opacity-100 transition-opacity text-indigo-400" />
+                    </span>
                     {result.chunk.page_number && (
                       <span>· Page {result.chunk.page_number}</span>
                     )}
@@ -152,6 +173,16 @@ export default function SearchPage() {
             </div>
           )}
         </div>
+      )}
+
+      {/* Slide-over Drawer */}
+      {activeDrawerDoc && (
+        <DocumentDrawer
+          documentId={activeDrawerDoc.documentId}
+          documentFilename={activeDrawerDoc.filename}
+          highlightChunkId={activeDrawerDoc.chunkId}
+          onClose={() => setActiveDrawerDoc(null)}
+        />
       )}
     </div>
   );

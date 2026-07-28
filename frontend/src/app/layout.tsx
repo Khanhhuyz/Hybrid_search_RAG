@@ -17,6 +17,13 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en" className="dark">
+      <head>
+        <script
+          dangerouslySetInnerHTML={{
+            __html: `console.log("%c Powered by Mini-GraphRAG by QuiNC (quinc-fptu) [CC BY-NC 4.0]", "color: #6366f1; font-weight: bold; font-size: 12px;");`,
+          }}
+        />
+      </head>
       <body className={`${inter.variable} font-sans bg-[#0a0b0f] text-zinc-100 antialiased`}>
         <div className="flex h-screen overflow-hidden">
           <Sidebar />

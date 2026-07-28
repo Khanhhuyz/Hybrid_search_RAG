@@ -24,9 +24,15 @@ class VectorStoreService:
     """Qdrant-backed vector store for chunk embeddings."""
 
     def __init__(self):
-        settings.QDRANT_PATH.mkdir(parents=True, exist_ok=True)
-        # Use local disk-based Qdrant (synchronous client)
-        self.client = QdrantClient(path=str(settings.QDRANT_PATH))
+        if settings.QDRANT_URL and settings.QDRANT_API_KEY:
+            logger.info(f"Connecting to Qdrant Cloud: {settings.QDRANT_URL}")
+            self.client = QdrantClient(
+                url=settings.QDRANT_URL,
+                api_key=settings.QDRANT_API_KEY,
+            )
+        else:
+            settings.QDRANT_PATH.mkdir(parents=True, exist_ok=True)
+            self.client = QdrantClient(path=str(settings.QDRANT_PATH))
         self.collection = settings.QDRANT_COLLECTION
         self.dimension  = settings.EMBEDDING_DIMENSION
 
