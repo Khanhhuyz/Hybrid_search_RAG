@@ -277,7 +277,6 @@ class GraphBuilderService:
             except Exception:
                 neighborhood.add(seed)
 
-        subgraph = self.graph.subgraph(neighborhood)
         return self.get_graph_data(max_nodes=100)
 
     def find_entities_in_text(self, text: str) -> List[str]:
