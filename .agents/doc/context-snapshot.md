@@ -17,7 +17,7 @@
 - Created unit tests (`backend/tests/test_chunker.py`, `backend/tests/test_rrf.py`) using Python standard `unittest`.
 - Created GitHub Actions CI workflow (`.github/workflows/ci.yml`) and linter config (`backend/pyproject.toml`).
 - Updated `README.md`, `CONTRIBUTING.md`, and `HANDOVER.md` for AI Agent handoffs and collaborator alignment.
-- All 5 unit tests passing (`python -m unittest discover -s tests`). Pushed to GitHub `https://github.com/quinc-fptu/mini-graphrag`.
+- All 5 unit tests passing (`python -m unittest discover -s tests`). CI workflow fully green. Pushed to GitHub `https://github.com/quinc-fptu/mini-graphrag`.
 
 ## Next Steps for Collaborators / Next Agents
 - **Run Unit Tests**: `cd backend && python -m unittest discover -s tests`
