@@ -2,12 +2,10 @@
 Documents API
 Handles file upload, listing, retrieval, and deletion.
 """
-import shutil
 import uuid
 import logging
 import asyncio
 from pathlib import Path
-from typing import Optional, List
 
 from fastapi import APIRouter, UploadFile, File, HTTPException, BackgroundTasks, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -72,7 +70,6 @@ async def upload_document(
         chunks.append(chunk)
 
     content = b"".join(chunks)
-    size_mb = total_size / (1024 * 1024)
 
     # ── Persist file ──────────────────────────────────────────────────────────
     doc_id   = str(uuid.uuid4())
