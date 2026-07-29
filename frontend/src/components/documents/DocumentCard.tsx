@@ -43,7 +43,7 @@ export function DocumentCard({ doc: initialDoc, onDelete }: DocumentCardProps) {
             clearInterval(pollRef.current!);
           }
         } catch {}
-      }, 2500);
+      }, 1000);
     }
     return () => { if (pollRef.current) clearInterval(pollRef.current); };
   }, [doc.id, doc.status, doc.chunk_count, doc.entity_count]);

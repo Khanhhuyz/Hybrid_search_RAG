@@ -133,6 +133,21 @@ async def get_document(doc_id: str, db: AsyncSession = Depends(get_db)):
     return doc
 
 
+# ─── Get Status ───────────────────────────────────────────────────────────────
+
+@router.get("/{doc_id}/status")
+async def get_document_status(doc_id: str, db: AsyncSession = Depends(get_db)):
+    """Fetch processing status and progress metadata for a document."""
+    doc = await _get_doc_or_404(db, doc_id)
+    return {
+        "id": doc.id,
+        "status": doc.status,
+        "chunk_count": doc.chunk_count,
+        "entity_count": doc.entity_count,
+        "error_message": doc.error_message,
+    }
+
+
 # ─── Delete ───────────────────────────────────────────────────────────────────
 
 @router.delete("/{doc_id}", status_code=204)
