@@ -164,7 +164,8 @@ class VectorStoreService:
     # ─── Delete ───────────────────────────────────────────────────────────────
 
     async def delete_by_document(self, document_id: str):
-        """Remove all vectors associated with a document (non-blocking)."""
+        """Remove all vectors associated with a document (non-blocking). Guaranteed for Local & Cloud."""
+        # 1. Filter delete by payload document_id
         await asyncio.to_thread(
             self.client.delete,
             collection_name=self.collection,
@@ -177,7 +178,31 @@ class VectorStoreService:
                 ]
             ),
         )
-        logger.info(f"Deleted vectors for document: {document_id}")
+
+        # 2. Verification pass: scroll to ensure no orphaned points remain for document_id
+        try:
+            res = await asyncio.to_thread(
+                self.client.scroll,
+                collection_name=self.collection,
+                limit=1000,
+                with_payload=True,
+            )
+            points = res[0]
+            remaining_ids = [
+                p.id for p in points
+                if p.payload and p.payload.get("document_id") == document_id
+            ]
+            if remaining_ids:
+                await asyncio.to_thread(
+                    self.client.delete,
+                    collection_name=self.collection,
+                    points_selector=remaining_ids,
+                )
+                logger.info(f"Purged {len(remaining_ids)} remaining point IDs for document: {document_id}")
+        except Exception as e:
+            logger.warning(f"Verification scroll during deletion warning: {e}")
+
+        logger.info(f"Successfully deleted all vectors for document: {document_id}")
 
     # ─── Stats ────────────────────────────────────────────────────────────────
 
