@@ -113,15 +113,25 @@ class VectorStoreService:
         """Perform cosine similarity search with optional document filter (non-blocking)."""
         qdrant_filter = None
         if document_ids:
-            qdrant_filter = Filter(
-                must=[
-                    FieldCondition(
-                        key="document_id",
-                        match=MatchValue(value=did),
-                    )
-                    for did in document_ids
-                ]
-            )
+            if len(document_ids) == 1:
+                qdrant_filter = Filter(
+                    must=[
+                        FieldCondition(
+                            key="document_id",
+                            match=MatchValue(value=document_ids[0]),
+                        )
+                    ]
+                )
+            else:
+                qdrant_filter = Filter(
+                    should=[
+                        FieldCondition(
+                            key="document_id",
+                            match=MatchValue(value=did),
+                        )
+                        for did in document_ids
+                    ]
+                )
 
         threshold = score_threshold if score_threshold is not None else settings.SIMILARITY_THRESHOLD
         kwargs: Dict[str, Any] = {
