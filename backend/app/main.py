@@ -48,12 +48,19 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"❌ Failed to initialize services: {e}")
 
-    # Ensure Qdrant collection exists
+    # Ensure Qdrant collection exists & sync active docs
     try:
+        from app.database import AsyncSessionLocal, DocumentModel
+        from sqlalchemy import select
+        async with AsyncSessionLocal() as db:
+            res = await db.execute(select(DocumentModel.id))
+            active_ids = set(res.scalars().all())
+
         vs = get_vector_store()
         if vs:
             await vs.ensure_collection()
-            logger.info("✅ Vector store ready")
+            await vs.purge_orphaned_vectors(active_ids)
+            logger.info("✅ Vector store ready & synced")
     except Exception as e:
         logger.warning(f"⚠️ Vector store degraded or not reachable on startup: {e}")
 

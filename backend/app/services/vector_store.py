@@ -181,6 +181,30 @@ class VectorStoreService:
 
     # ─── Stats ────────────────────────────────────────────────────────────────
 
+    async def purge_orphaned_vectors(self, active_document_ids: set):
+        """Remove points in Qdrant whose document_id is no longer in active_document_ids."""
+        try:
+            res = await asyncio.to_thread(
+                self.client.scroll,
+                collection_name=self.collection,
+                limit=1000,
+                with_payload=True,
+            )
+            points = res[0]
+            orphaned = [
+                p.id for p in points
+                if p.payload and p.payload.get("document_id") not in active_document_ids
+            ]
+            if orphaned:
+                await asyncio.to_thread(
+                    self.client.delete,
+                    collection_name=self.collection,
+                    points_selector=orphaned,
+                )
+                logger.info(f"Purged {len(orphaned)} orphaned vectors from Qdrant")
+        except Exception as e:
+            logger.warning(f"Failed to purge orphaned vectors: {e}")
+
     async def collection_info(self) -> dict:
         info = await asyncio.to_thread(self.client.get_collection, self.collection)
         return {
