@@ -19,7 +19,7 @@ from app.services.chunker import TextChunker
 from app.services.embedder import EmbedderService
 from app.services.vector_store import VectorStoreService
 from app.services.graph_builder import GraphBuilderService
-from app.dependencies import get_embedder, get_vector_store, get_graph_builder
+from app.dependencies import get_embedder, get_vector_store, get_graph_builder, get_rag_pipeline
 
 router = APIRouter(prefix="/documents", tags=["Documents"])
 logger = logging.getLogger(__name__)
@@ -38,8 +38,11 @@ async def upload_document(
     embedder: EmbedderService = Depends(get_embedder),
     vector_store: VectorStoreService = Depends(get_vector_store),
     graph_builder: GraphBuilderService = Depends(get_graph_builder),
+    rag: RAGPipeline = Depends(get_rag_pipeline),
 ):
     """Upload a document and trigger async processing pipeline."""
+    # Clear pipeline cache on new document upload
+    rag.clear_cache()
     # ── Validation ────────────────────────────────────────────────────────────
     if not file.filename:
         raise HTTPException(status_code=400, detail="Filename cannot be empty")
@@ -156,8 +159,12 @@ async def delete_document(
     db: AsyncSession = Depends(get_db),
     vector_store: VectorStoreService = Depends(get_vector_store),
     graph_builder: GraphBuilderService = Depends(get_graph_builder),
+    rag: RAGPipeline = Depends(get_rag_pipeline),
 ):
     doc = await _get_doc_or_404(db, doc_id)
+
+    # Clear RAG cache so old questions don't return deleted doc context
+    rag.clear_cache()
 
     # Delete vectors
     try:

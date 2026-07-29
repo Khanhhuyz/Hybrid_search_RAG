@@ -57,6 +57,11 @@ class RAGPipeline:
         self._response_cache: Dict[str, Dict[str, Any]] = {}
         self._cache_max_size = 100
 
+    def clear_cache(self):
+        """Clear in-memory response cache."""
+        self._response_cache.clear()
+        logger.info("Cleared RAG response cache")
+
     def _get_cache_key(self, question: str, top_k: int, use_graph: bool, doc_ids: Optional[List[str]]) -> str:
         doc_str = ",".join(sorted(doc_ids)) if doc_ids else "all"
         return f"{question.strip().lower()}:{top_k}:{use_graph}:{doc_str}"
