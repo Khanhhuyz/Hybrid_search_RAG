@@ -16,6 +16,7 @@ class Settings(BaseSettings):
     APP_NAME: str = "GRAG - GraphRAG System"
     APP_VERSION: str = "1.0.0"
     DEBUG: bool = False
+    LOG_LEVEL: str = "INFO"
     API_PREFIX: str = "/api/v1"
 
     # ─── Server ──────────────────────────────────────────────────────

@@ -43,6 +43,9 @@ async def upload_document(
 ):
     """Upload a document and trigger async processing pipeline."""
     # ── Validation ────────────────────────────────────────────────────────────
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="Filename cannot be empty")
+
     suffix = Path(file.filename).suffix.lower()
     if suffix not in settings.ALLOWED_EXTENSIONS:
         raise HTTPException(
@@ -50,14 +53,26 @@ async def upload_document(
             detail=f"Unsupported file type '{suffix}'. Allowed: {settings.ALLOWED_EXTENSIONS}",
         )
 
-    # Read file into memory to check size
-    content = await file.read()
-    size_mb = len(content) / (1024 * 1024)
-    if size_mb > settings.MAX_FILE_SIZE_MB:
-        raise HTTPException(
-            status_code=413,
-            detail=f"File too large ({size_mb:.1f} MB). Max allowed: {settings.MAX_FILE_SIZE_MB} MB",
-        )
+    # Read file incrementally to check size limit without memory exhaustion
+    max_bytes = settings.MAX_FILE_SIZE_MB * 1024 * 1024
+    chunks = []
+    total_size = 0
+    chunk_size = 1024 * 1024  # 1MB chunk
+
+    while True:
+        chunk = await file.read(chunk_size)
+        if not chunk:
+            break
+        total_size += len(chunk)
+        if total_size > max_bytes:
+            raise HTTPException(
+                status_code=413,
+                detail=f"File size exceeds maximum limit of {settings.MAX_FILE_SIZE_MB} MB",
+            )
+        chunks.append(chunk)
+
+    content = b"".join(chunks)
+    size_mb = total_size / (1024 * 1024)
 
     # ── Persist file ──────────────────────────────────────────────────────────
     doc_id   = str(uuid.uuid4())

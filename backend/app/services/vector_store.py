@@ -2,6 +2,7 @@
 Vector Store Service
 Manages chunk embeddings in Qdrant vector database (Local Mode).
 """
+import asyncio
 import logging
 from typing import List, Dict, Any, Optional
 
@@ -39,12 +40,13 @@ class VectorStoreService:
     # ─── Initialization ───────────────────────────────────────────────────────
 
     async def ensure_collection(self):
-        """Create the Qdrant collection if it doesn't exist."""
-        collections = self.client.get_collections()
+        """Create the Qdrant collection if it doesn't exist (non-blocking)."""
+        collections = await asyncio.to_thread(self.client.get_collections)
         existing = [c.name for c in collections.collections]
 
         if self.collection not in existing:
-            self.client.create_collection(
+            await asyncio.to_thread(
+                self.client.create_collection,
                 collection_name=self.collection,
                 vectors_config=VectorParams(
                     size=self.dimension,
@@ -61,8 +63,9 @@ class VectorStoreService:
         self,
         chunks: List[Dict[str, Any]],
         embeddings: List[List[float]],
+        batch_size: int = 100,
     ):
-        """Store chunks with their embeddings in Qdrant."""
+        """Store chunks with their embeddings in Qdrant in batches (non-blocking)."""
         if len(chunks) != len(embeddings):
             raise ValueError("chunks and embeddings must have the same length")
 
@@ -88,11 +91,15 @@ class VectorStoreService:
             )
 
         if points:
-            self.client.upsert(
-                collection_name=self.collection,
-                points=points,
-            )
-            logger.info(f"Upserted {len(points)} vectors to Qdrant")
+            # Batch upsert to prevent huge memory / payload spikes
+            for i in range(0, len(points), batch_size):
+                batch = points[i : i + batch_size]
+                await asyncio.to_thread(
+                    self.client.upsert,
+                    collection_name=self.collection,
+                    points=batch,
+                )
+            logger.info(f"Upserted {len(points)} vectors to Qdrant in batches of {batch_size}")
 
     # ─── Search ───────────────────────────────────────────────────────────────
 
@@ -103,7 +110,7 @@ class VectorStoreService:
         document_ids: Optional[List[str]] = None,
         score_threshold: float = None,
     ) -> List[Dict[str, Any]]:
-        """Perform cosine similarity search with optional document filter."""
+        """Perform cosine similarity search with optional document filter (non-blocking)."""
         qdrant_filter = None
         if document_ids:
             qdrant_filter = Filter(
@@ -127,7 +134,7 @@ class VectorStoreService:
         if threshold is not None and threshold > 0:
             kwargs["score_threshold"] = threshold
 
-        response = self.client.query_points(**kwargs)
+        response = await asyncio.to_thread(self.client.query_points, **kwargs)
         results = response.points
 
         return [
@@ -147,8 +154,9 @@ class VectorStoreService:
     # ─── Delete ───────────────────────────────────────────────────────────────
 
     async def delete_by_document(self, document_id: str):
-        """Remove all vectors associated with a document."""
-        self.client.delete(
+        """Remove all vectors associated with a document (non-blocking)."""
+        await asyncio.to_thread(
+            self.client.delete,
             collection_name=self.collection,
             points_selector=Filter(
                 must=[
@@ -164,7 +172,7 @@ class VectorStoreService:
     # ─── Stats ────────────────────────────────────────────────────────────────
 
     async def collection_info(self) -> dict:
-        info = self.client.get_collection(self.collection)
+        info = await asyncio.to_thread(self.client.get_collection, self.collection)
         return {
             "vectors_count": info.vectors_count,
             "indexed_vectors_count": getattr(info, "indexed_vectors_count", 0),
@@ -173,7 +181,8 @@ class VectorStoreService:
 
     async def health_check(self) -> dict:
         try:
-            collections = self.client.get_collections()
+            collections = await asyncio.to_thread(self.client.get_collections)
             return {"status": "ok", "collections": [c.name for c in collections.collections], "mode": "local"}
         except Exception as e:
             return {"status": "error", "message": str(e)}
+

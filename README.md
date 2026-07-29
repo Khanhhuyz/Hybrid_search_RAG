@@ -101,6 +101,15 @@ Open `http://localhost:3000` in your browser.
 
 ---
 
+### 4. Running Tests
+
+```bash
+cd backend
+python -m unittest discover -s tests
+```
+
+---
+
 ## Docker Setup
 
 ```bash
@@ -114,12 +123,16 @@ docker compose up -d
 ```text
 GRAG/
 ├── backend/
-│   ├── app/
-│   │   ├── api/          # Document, search, and graph routes
-│   │   ├── services/     # Chunker, RAG pipeline, vector store, graph builder
-│   │   └── main.py       # FastAPI application
+│   ├── app/          # Document, search, and graph routes
+│   │   ├── services/ # Chunker, RAG pipeline, vector store, graph builder
+│   │   └── main.py   # FastAPI application with fault-tolerant lifespan & health check
+│   ├── tests/        # Unit tests for Chunker, RRF, and Citations
+│   ├── pyproject.toml # Linter & pytest configurations
 │   ├── Dockerfile
 │   └── requirements.txt
+├── .github/
+│   └── workflows/
+│       └── ci.yml    # GitHub Actions automated CI testing pipeline
 ├── frontend/
 │   ├── src/
 │   │   ├── app/          # Dashboard, chat, search, graph pages
