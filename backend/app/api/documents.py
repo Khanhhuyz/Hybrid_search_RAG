@@ -19,6 +19,7 @@ from app.services.chunker import TextChunker
 from app.services.embedder import EmbedderService
 from app.services.vector_store import VectorStoreService
 from app.services.graph_builder import GraphBuilderService
+from app.services.rag_pipeline import RAGPipeline
 from app.dependencies import get_embedder, get_vector_store, get_graph_builder, get_rag_pipeline
 
 router = APIRouter(prefix="/documents", tags=["Documents"])
