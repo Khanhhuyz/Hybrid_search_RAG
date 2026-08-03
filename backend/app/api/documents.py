@@ -230,7 +230,13 @@ async def get_document_file(doc_id: str, db: AsyncSession = Depends(get_db)):
     if not file_path.exists():
         raise HTTPException(status_code=404, detail="File not found on disk")
     
-    media_type = "application/pdf" if doc.file_type == "pdf" else "text/plain"
+    media_types = {
+        ".pdf": "application/pdf",
+        ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        ".md": "text/markdown",
+        ".txt": "text/plain",
+    }
+    media_type = media_types.get(doc.file_type.lower(), "application/octet-stream")
     return FileResponse(path=file_path, filename=doc.original_name, media_type=media_type)
 
 
@@ -301,7 +307,16 @@ async def _process_document(
             await db.commit()
 
             # ── Knowledge Graph ────────────────────────────────────────────
-            entity_count = await graph_builder.process_chunks(chunks)
+            entity_count = 0
+            try:
+                entity_count = await graph_builder.process_chunks(chunks)
+            except Exception as graph_error:
+                # Vector indexing remains useful when the optional graph backend is degraded.
+                logger.warning(
+                    "Graph indexing failed for %s; completing vector indexing: %s",
+                    doc_id,
+                    graph_error,
+                )
 
             # ── Update status → COMPLETED ──────────────────────────────────
             await db.execute(

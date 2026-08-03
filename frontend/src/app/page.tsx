@@ -96,10 +96,10 @@ export default function DashboardPage() {
           sub="Indexed in local Qdrant"
         />
         <StatCard
-          icon={<Cpu size={15} className={health?.services?.ollama?.status === "ok" ? "text-emerald-400" : "text-rose-400"} />}
+          icon={<Cpu size={15} className={(typeof health?.services?.ollama === "object" ? health.services.ollama.status : health?.services?.ollama) === "ok" ? "text-emerald-400" : "text-rose-400"} />}
           label="AI Inference Engine"
-          value={health?.services?.ollama?.status === "ok" ? "Online" : "Offline"}
-          sub={health?.services?.ollama?.model ?? "Ollama Local"}
+          value={(typeof health?.services?.ollama === "object" ? health.services.ollama.status : health?.services?.ollama) === "ok" ? "Online" : "Offline"}
+          sub={(typeof health?.services?.ollama === "object" ? health.services.ollama.model : undefined) ?? "Ollama Local"}
         />
       </div>
 

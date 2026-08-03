@@ -2,7 +2,7 @@
 Pydantic schemas for request/response validation.
 """
 from pydantic import BaseModel, Field
-from typing import Optional, List, Any
+from typing import Optional, List, Any, Dict
 from datetime import datetime
 from enum import Enum
 
@@ -14,6 +14,13 @@ class ProcessingStatus(str, Enum):
     PROCESSING = "processing"
     COMPLETED  = "completed"
     FAILED     = "failed"
+
+
+class SearchType(str, Enum):
+    LOCAL  = "local"
+    GLOBAL = "global"
+    HYBRID = "hybrid"
+    AUTO   = "auto"
 
 
 # ─── Document Schemas ─────────────────────────────────────────────────────────
@@ -61,6 +68,7 @@ class SearchRequest(BaseModel):
     query: str = Field(..., min_length=1, max_length=2000)
     top_k: int = Field(default=5, ge=1, le=20)
     document_ids: Optional[List[str]] = None
+    search_type: SearchType = Field(default=SearchType.AUTO, description="Search mode: local, global, hybrid, or auto")
 
 
 class SearchResult(BaseModel):
@@ -86,23 +94,34 @@ class EntityType(str, Enum):
     PRODUCT      = "PRODUCT"
     LOCATION     = "LOCATION"
     CONCEPT      = "CONCEPT"
+    PROJECT      = "PROJECT"
+    TECHNOLOGY   = "TECHNOLOGY"
+    EVENT        = "EVENT"
+    DOCUMENT     = "DOCUMENT"
 
 
 class RelationType(str, Enum):
-    WORKS_AT      = "WORKS_AT"
-    BELONGS_TO    = "BELONGS_TO"
+    WORKS_AT         = "WORKS_AT"
+    BELONGS_TO       = "BELONGS_TO"
     HAS_PREREQUISITE = "HAS_PREREQUISITE"
-    MENTIONS      = "MENTIONS"
-    RELATED_TO    = "RELATED_TO"
-    LOCATED_IN    = "LOCATED_IN"
+    MENTIONS         = "MENTIONS"
+    RELATED_TO       = "RELATED_TO"
+    LOCATED_IN       = "LOCATED_IN"
+    MANAGES          = "MANAGES"
+    USES             = "USES"
+    CREATED_BY       = "CREATED_BY"
+    DEPENDS_ON       = "DEPENDS_ON"
+    HAS_RISK         = "HAS_RISK"
+    PART_OF          = "PART_OF"
 
 
 class GraphNode(BaseModel):
     id: str
     label: str
     type: str
-    document_ids: List[str] = []
-    properties: dict = {}
+    document_ids: List[str] = Field(default_factory=list)
+    properties: dict = Field(default_factory=dict)
+    community_id: Optional[int] = None
 
 
 class GraphEdge(BaseModel):
@@ -110,7 +129,8 @@ class GraphEdge(BaseModel):
     target: str
     relation: str
     weight: float = 1.0
-    document_ids: List[str] = []
+    document_ids: List[str] = Field(default_factory=list)
+    description: str = ""
 
 
 class GraphResponse(BaseModel):
@@ -126,6 +146,23 @@ class EntityQueryRequest(BaseModel):
     depth: int = Field(default=2, ge=1, le=4)
 
 
+# ─── Community Schemas ────────────────────────────────────────────────────────
+
+class CommunityReport(BaseModel):
+    community_id: int
+    level: int = 0
+    title: str
+    summary: str
+    key_findings: List[str] = Field(default_factory=list)
+    main_entities: List[str] = Field(default_factory=list)
+    importance_score: float = 0.0
+
+
+class CommunityListResponse(BaseModel):
+    communities: List[CommunityReport]
+    total: int
+
+
 # ─── Chat Schemas ─────────────────────────────────────────────────────────────
 
 class ChatMessage(BaseModel):
@@ -135,10 +172,11 @@ class ChatMessage(BaseModel):
 
 class ChatRequest(BaseModel):
     question: str = Field(..., min_length=1, max_length=2000)
-    history: Optional[List[ChatMessage]] = []
+    history: List[ChatMessage] = Field(default_factory=list)
     use_graph: bool = True
     top_k: int = Field(default=5, ge=1, le=10)
     document_ids: Optional[List[str]] = None
+    search_type: SearchType = Field(default=SearchType.AUTO, description="Search mode: local, global, hybrid, or auto")
 
 
 class Citation(BaseModel):
@@ -152,8 +190,8 @@ class Citation(BaseModel):
 
 
 class GraphContext(BaseModel):
-    entities: List[str] = []
-    relations: List[dict] = []
+    entities: List[str] = Field(default_factory=list)
+    relations: List[dict] = Field(default_factory=list)
 
 
 class ChatResponse(BaseModel):
@@ -164,4 +202,59 @@ class ChatResponse(BaseModel):
     semantic_chunks_used: int
     graph_nodes_used: int
     model_used: str
-    retrieval_mode: str  # "semantic" | "graph" | "hybrid"
+    retrieval_mode: str  # "semantic" | "graph" | "hybrid" | "global"
+    query_type: str = "hybrid"  # "local" | "global" | "hybrid"
+    confidence_score: float = 0.0
+    timings_ms: Dict[str, float] = Field(default_factory=dict)
+    warnings: List[str] = Field(default_factory=list)
+
+
+# ─── Monitoring Schemas ───────────────────────────────────────────────────────
+
+class MonitoringStats(BaseModel):
+    total_queries: int
+    error_count: int
+    error_rate: float
+    avg_latency_ms: float
+    avg_confidence: float
+    query_type_distribution: Dict[str, int]
+    retrieval_mode_distribution: Dict[str, int]
+    stage_latencies: Dict[str, Any]
+    recent_queries_count: int
+
+
+class QueryLogEntry(BaseModel):
+    timestamp: str
+    question: str
+    query_type: str
+    retrieval_mode: str
+    timings_ms: Dict[str, float]
+    semantic_chunks_used: int
+    graph_nodes_used: int
+    confidence_score: float
+    success: bool
+    error: Optional[str] = None
+
+
+# Evaluation schemas
+class EvaluationCase(BaseModel):
+    question: str = Field(..., min_length=1, max_length=2000)
+    retrieved_chunk_ids: List[str] = Field(default_factory=list)
+    relevant_chunk_ids: List[str] = Field(default_factory=list)
+    answer: str = ""
+    reference_answer: str = ""
+
+
+class EvaluationRequest(BaseModel):
+    cases: List[EvaluationCase] = Field(..., min_length=1, max_length=1000)
+
+
+class EvaluationCaseResult(BaseModel):
+    question: str
+    metrics: Dict[str, float]
+
+
+class EvaluationResponse(BaseModel):
+    total_cases: int
+    aggregate: Dict[str, float]
+    cases: List[EvaluationCaseResult]

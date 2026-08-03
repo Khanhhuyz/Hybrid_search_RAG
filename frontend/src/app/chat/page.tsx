@@ -1,10 +1,11 @@
 "use client";
 
 import { useState, useRef, useEffect } from "react";
-import { chatApi, ChatMessage, ChatResponse, Citation } from "@/lib/api";
+import { chatApi, ChatMessage, ChatResponse, Citation, SearchType } from "@/lib/api";
 import { DocumentDrawer } from "@/components/documents/DocumentDrawer";
 import {
-  Send, Bot, User, BookOpen, Share2, Loader2, Sparkles, AlertCircle, Trash2, ExternalLink
+  Send, Bot, User, BookOpen, Share2, Loader2, Sparkles, AlertCircle, Trash2, ExternalLink,
+  Zap, Globe, Target, Shuffle, Shield, Clock,
 } from "lucide-react";
 
 interface Message {
@@ -14,15 +15,26 @@ interface Message {
   response?: ChatResponse;
   error?: string;
   loading?: boolean;
+  confidenceScore?: number;
+  timingsMs?: Record<string, number>;
+  warnings?: string[];
 }
 
-const STORAGE_KEY = "grag_chat_history_v1";
+const STORAGE_KEY = "grag_chat_history_v2";
+
+const SEARCH_TYPE_CONFIG: Record<SearchType, { label: string; icon: typeof Target; color: string; desc: string }> = {
+  auto: { label: "Auto", icon: Zap, color: "text-amber-400", desc: "Automatic routing" },
+  local: { label: "Local", icon: Target, color: "text-emerald-400", desc: "Entity-focused" },
+  global: { label: "Global", icon: Globe, color: "text-sky-400", desc: "Map-Reduce summaries" },
+  hybrid: { label: "Hybrid", icon: Shuffle, color: "text-violet-400", desc: "Vector + Graph + RRF" },
+};
 
 export default function ChatPage() {
   const [messages, setMessages] = useState<Message[]>([]);
-  const [input, setInput]       = useState("");
+  const [input, setInput] = useState("");
   const [useGraph, setUseGraph] = useState(true);
-  const [topK, setTopK]         = useState(5);
+  const [topK, setTopK] = useState(5);
+  const [searchType, setSearchType] = useState<SearchType>("auto");
   const [thinking, setThinking] = useState(false);
 
   // Drawer state for citation viewing
@@ -73,7 +85,7 @@ export default function ChatPage() {
 
     const userMsg: Message = { id: Date.now().toString(), role: "user", content: question };
     const botMsgId = (Date.now() + 1).toString();
-    const botMsg:  Message = { id: botMsgId, role: "assistant", content: "", loading: true };
+    const botMsg: Message = { id: botMsgId, role: "assistant", content: "", loading: true };
 
     setMessages((prev) => [...prev, userMsg, botMsg]);
     setInput("");
@@ -98,19 +110,22 @@ export default function ChatPage() {
             prev.map((m) =>
               m.id === botMsgId
                 ? {
-                    ...m,
-                    loading: false,
-                    response: {
-                      question: metadata.question || question,
-                      answer: "",
-                      citations: metadata.citations || [],
-                      graph_context: metadata.graph_context,
-                      semantic_chunks_used: metadata.semantic_chunks_used || 0,
-                      graph_nodes_used: metadata.graph_nodes_used || 0,
-                      model_used: metadata.model_used || "",
-                      retrieval_mode: metadata.retrieval_mode || "hybrid",
-                    },
-                  }
+                  ...m,
+                  loading: false,
+                  response: {
+                    question: metadata.question || question,
+                    answer: "",
+                    citations: metadata.citations || [],
+                    graph_context: metadata.graph_context,
+                    semantic_chunks_used: metadata.semantic_chunks_used || 0,
+                    graph_nodes_used: metadata.graph_nodes_used || 0,
+                    model_used: metadata.model_used || "",
+                    retrieval_mode: metadata.retrieval_mode || "hybrid",
+                    query_type: metadata.query_type,
+                    confidence_score: metadata.confidence_score,
+                    timings_ms: metadata.timings_ms,
+                  },
+                }
                 : m
             )
           );
@@ -130,6 +145,22 @@ export default function ChatPage() {
             prev.map((m) =>
               m.id === botMsgId
                 ? { ...m, error, loading: false }
+                : m
+            )
+          );
+        },
+        searchType,
+        (doneData) => {
+          // Received done event with confidence and timings
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === botMsgId
+                ? {
+                  ...m,
+                  confidenceScore: doneData.confidence_score,
+                  timingsMs: doneData.timings_ms,
+                  warnings: doneData.warnings,
+                }
                 : m
             )
           );
@@ -155,9 +186,32 @@ export default function ChatPage() {
       <div className="flex-shrink-0 px-6 py-4 border-b border-[#252836] flex items-center justify-between">
         <div>
           <h1 className="text-lg font-bold gradient-text">GraphRAG Chat</h1>
-          <p className="text-xs text-zinc-500">Hybrid semantic + knowledge graph retrieval</p>
+          <p className="text-xs text-zinc-500">Semantic + Knowledge Graph + Community Insights</p>
         </div>
-        <div className="flex items-center gap-4 text-sm">
+        <div className="flex items-center gap-3 text-sm">
+          {/* Search Mode Selector */}
+          <div className="flex items-center gap-1 bg-[#12141a] rounded-lg p-0.5 border border-[#252836]">
+            {(Object.keys(SEARCH_TYPE_CONFIG) as SearchType[]).map((type) => {
+              const cfg = SEARCH_TYPE_CONFIG[type];
+              const Icon = cfg.icon;
+              const isActive = searchType === type;
+              return (
+                <button
+                  key={type}
+                  onClick={() => setSearchType(type)}
+                  title={cfg.desc}
+                  className={`flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-medium transition-all ${isActive
+                    ? `bg-[#1e2030] ${cfg.color} border border-[#353847]`
+                    : "text-zinc-500 hover:text-zinc-300"
+                    }`}
+                >
+                  <Icon size={12} />
+                  {cfg.label}
+                </button>
+              );
+            })}
+          </div>
+
           <label className="flex items-center gap-2 text-zinc-400 cursor-pointer">
             <input
               type="checkbox"
@@ -166,10 +220,10 @@ export default function ChatPage() {
               className="accent-indigo-500"
             />
             <Share2 size={14} />
-            Use Graph
+            Graph
           </label>
           <label className="flex items-center gap-2 text-zinc-400">
-            <span>Top-K:</span>
+            <span>K:</span>
             <select
               value={topK}
               onChange={(e) => setTopK(Number(e.target.value))}
@@ -199,9 +253,23 @@ export default function ChatPage() {
               <Sparkles size={28} className="text-indigo-400" />
             </div>
             <h2 className="text-lg font-semibold text-zinc-200">Ask anything about your documents</h2>
-            <p className="text-zinc-500 text-sm mt-2 max-w-sm">
-              GRAG combines vector search and knowledge graph traversal to give you accurate, cited answers.
+            <p className="text-zinc-500 text-sm mt-2 max-w-md">
+              GRAG v2 combines vector search, knowledge graph traversal, community insights, and
+              Map-Reduce global search to give you accurate, cited answers.
             </p>
+            <div className="flex gap-3 mt-6">
+              {(["local", "global", "hybrid"] as SearchType[]).map((type) => {
+                const cfg = SEARCH_TYPE_CONFIG[type];
+                const Icon = cfg.icon;
+                return (
+                  <div key={type} className="glass rounded-lg px-4 py-3 text-xs text-center space-y-1 min-w-[110px]">
+                    <Icon size={16} className={`mx-auto ${cfg.color}`} />
+                    <div className="font-medium text-zinc-300">{cfg.label} Search</div>
+                    <div className="text-zinc-500">{cfg.desc}</div>
+                  </div>
+                );
+              })}
+            </div>
           </div>
         )}
 
@@ -216,11 +284,10 @@ export default function ChatPage() {
             <div className={`max-w-[80%] ${msg.role === "user" ? "order-first" : ""}`}>
               {/* Bubble */}
               <div
-                className={`px-4 py-3 rounded-2xl text-sm leading-relaxed ${
-                  msg.role === "user"
-                    ? "bg-indigo-600 text-white ml-auto"
-                    : "glass text-zinc-100"
-                }`}
+                className={`px-4 py-3 rounded-2xl text-sm leading-relaxed ${msg.role === "user"
+                  ? "bg-indigo-600 text-white ml-auto"
+                  : "glass text-zinc-100"
+                  }`}
               >
                 {msg.loading ? (
                   <div className="flex items-center gap-2 text-zinc-400">
@@ -240,11 +307,21 @@ export default function ChatPage() {
               {/* Metadata */}
               {msg.response && (
                 <div className="mt-2 space-y-2">
-                  {/* Retrieval info */}
+                  {/* Retrieval info row */}
                   <div className="flex flex-wrap gap-2 text-xs">
+                    {/* Retrieval mode badge */}
                     <span className="px-2 py-0.5 rounded-full bg-indigo-500/10 border border-indigo-500/20 text-indigo-400">
                       {msg.response.retrieval_mode} retrieval
                     </span>
+                    {/* Query type badge */}
+                    {msg.response.query_type && (
+                      <span className={`px-2 py-0.5 rounded-full border ${SEARCH_TYPE_CONFIG[msg.response.query_type as SearchType]
+                        ? `${SEARCH_TYPE_CONFIG[msg.response.query_type as SearchType].color} bg-zinc-800/50 border-zinc-700/50`
+                        : "text-zinc-400 bg-zinc-800/50 border-zinc-700/50"
+                        }`}>
+                        {msg.response.query_type}
+                      </span>
+                    )}
                     <span className="px-2 py-0.5 rounded-full bg-zinc-700/50 text-zinc-400">
                       {msg.response.semantic_chunks_used} chunks
                     </span>
@@ -253,9 +330,31 @@ export default function ChatPage() {
                         {msg.response.graph_nodes_used} graph nodes
                       </span>
                     )}
+                    {/* Confidence badge */}
+                    {msg.confidenceScore !== undefined && (
+                      <ConfidenceBadge score={msg.confidenceScore} />
+                    )}
+                    {/* Total latency */}
+                    {msg.timingsMs && (
+                      <span className="px-2 py-0.5 rounded-full bg-zinc-800/50 border border-zinc-700/50 text-zinc-500 flex items-center gap-1">
+                        <Clock size={10} />
+                        {Object.values(msg.timingsMs).reduce((a, b) => a + b, 0).toFixed(0)}ms
+                      </span>
+                    )}
                   </div>
 
-                  {/* Graph context */}
+                  {/* Warnings */}
+                  {msg.warnings && msg.warnings.length > 0 && (
+                    <div className="flex flex-wrap gap-1">
+                      {msg.warnings.map((w, i) => (
+                        <span key={i} className="text-xs px-2 py-0.5 rounded-full bg-amber-500/10 text-amber-400 border border-amber-500/20">
+                          ⚠ {w}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+
+                  {/* Graph context entities */}
                   {msg.response.graph_context?.entities.length ? (
                     <div className="flex flex-wrap gap-1">
                       {msg.response.graph_context.entities.map((e, i) => (
@@ -265,6 +364,26 @@ export default function ChatPage() {
                       ))}
                     </div>
                   ) : null}
+
+                  {/* Timings detail (collapsible) */}
+                  {msg.timingsMs && Object.keys(msg.timingsMs).length > 1 && (
+                    <details className="group">
+                      <summary className="flex items-center gap-1 text-xs text-zinc-600 cursor-pointer hover:text-zinc-400 transition-colors">
+                        <Clock size={10} />
+                        Pipeline timings
+                      </summary>
+                      <div className="mt-1.5 grid grid-cols-2 gap-1 text-xs">
+                        {Object.entries(msg.timingsMs)
+                          .sort(([, a], [, b]) => b - a)
+                          .map(([stage, ms]) => (
+                            <div key={stage} className="flex justify-between px-2 py-0.5 rounded bg-zinc-800/30">
+                              <span className="text-zinc-500">{stage.replace(/_/g, " ")}</span>
+                              <span className="text-zinc-400 font-mono">{ms.toFixed(0)}ms</span>
+                            </div>
+                          ))}
+                      </div>
+                    </details>
+                  )}
 
                   {/* Citations */}
                   {msg.response.citations.length > 0 && (
@@ -338,6 +457,23 @@ export default function ChatPage() {
         />
       )}
     </div>
+  );
+}
+
+function ConfidenceBadge({ score }: { score: number }) {
+  const pct = Math.round(score * 100);
+  let color = "text-emerald-400 bg-emerald-500/10 border-emerald-500/20";
+  if (score < 0.4) {
+    color = "text-rose-400 bg-rose-500/10 border-rose-500/20";
+  } else if (score < 0.7) {
+    color = "text-amber-400 bg-amber-500/10 border-amber-500/20";
+  }
+
+  return (
+    <span className={`px-2 py-0.5 rounded-full border flex items-center gap-1 ${color}`}>
+      <Shield size={10} />
+      {pct}%
+    </span>
   );
 }
 

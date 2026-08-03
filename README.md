@@ -110,6 +110,31 @@ python -m unittest discover -s tests
 
 ---
 
+## Offline Evaluation
+
+Run deterministic evaluation through `POST /api/v1/evaluation/run`:
+
+```json
+{
+  "cases": [
+    {
+      "question": "Who manages Project Alpha?",
+      "retrieved_chunk_ids": ["chunk-1", "chunk-2"],
+      "relevant_chunk_ids": ["chunk-2"],
+      "answer": "Alice manages Project Alpha.",
+      "reference_answer": "Project Alpha is managed by Alice."
+    }
+  ]
+}
+```
+
+The response includes per-case and aggregate precision, recall, retrieval F1,
+hit rate, reciprocal rank, and Unicode-aware answer token F1. Keep labelled
+datasets in `data/evaluation/` and compare these metrics before and after changes
+to chunking, graph extraction, prompts, or retrieval.
+
+---
+
 ## Docker Setup
 
 ```bash
@@ -153,3 +178,14 @@ GRAG/
 ## License
 
 CC BY-NC 4.0 License (Non-Commercial). See [LICENSE](LICENSE) for details.
+
+Project	Service	Status	URL
+mini-graphrag	Frontend	✅ Up	http://localhost:3000
+mini-graphrag	Backend	✅ Up	http://localhost:8000/docs
+mini-graphrag	Qdrant	✅ Healthy	http://localhost:6333/dashboard
+rag-production-template	API	✅ Healthy	http://localhost:8001/docs
+rag-production-template	Qdrant	✅ Up	http://localhost:6335/dashboard
+
+Frontend App: http://localhost:3000
+Backend API Docs: http://localhost:8000/docs
+Neo4j Browser UI: http://localhost:7474 (User: neo4j, Password: grag_password_2024)

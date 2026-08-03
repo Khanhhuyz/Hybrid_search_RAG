@@ -1,20 +1,26 @@
 """
 Document Processor Service
 Handles text extraction from PDF, DOCX, TXT, and Markdown files.
+Integrates TextCleaner for preprocessing before chunking.
 """
 import re
 import logging
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List
+
+from app.services.text_cleaner import TextCleaner
 
 logger = logging.getLogger(__name__)
 
 
 class DocumentProcessor:
-    """Extract and normalize text from multiple document formats."""
+    """Extract, clean, and normalize text from multiple document formats."""
+
+    def __init__(self):
+        self.cleaner = TextCleaner()
 
     def extract_text(self, file_path: Path, file_type: str) -> str:
-        """Extract raw text from a document based on its type."""
+        """Extract and clean text from a document based on its type."""
         extractors = {
             ".pdf":  self._extract_pdf,
             ".docx": self._extract_docx,
@@ -24,11 +30,27 @@ class DocumentProcessor:
         extractor = extractors.get(file_type.lower())
         if not extractor:
             raise ValueError(f"Unsupported file type: {file_type}")
-        return extractor(file_path)
+
+        # Extract raw text (and pages for PDFs)
+        if file_type.lower() == ".pdf":
+            raw_text, pages = self._extract_pdf_with_pages(file_path)
+            # Clean with page-aware header/footer detection
+            cleaned = self.cleaner.clean(raw_text, pages=pages)
+        else:
+            raw_text = extractor(file_path)
+            cleaned = self.cleaner.clean(raw_text)
+
+        return cleaned
 
     # ─── Format-Specific Extractors ──────────────────────────────────────────
 
     def _extract_pdf(self, file_path: Path) -> str:
+        """Extract text from PDF (without per-page info)."""
+        text, _ = self._extract_pdf_with_pages(file_path)
+        return text
+
+    def _extract_pdf_with_pages(self, file_path: Path) -> tuple:
+        """Extract text from PDF, returning (full_text, list_of_page_texts)."""
         try:
             import pdfplumber
             pages_text = []
@@ -37,7 +59,7 @@ class DocumentProcessor:
                     text = page.extract_text()
                     if text:
                         pages_text.append(text)
-            return "\n\n".join(pages_text)
+            return "\n\n".join(pages_text), pages_text
         except ImportError:
             raise RuntimeError("pdfplumber is required for PDF processing. Run: pip install pdfplumber")
         except Exception as e:
@@ -83,19 +105,8 @@ class DocumentProcessor:
         text = re.sub(r"(\*{1,2}|_{1,2})(.*?)\1", r"\2", text) # bold/italic
         return text.strip()
 
-    # ─── Text Normalization ───────────────────────────────────────────────────
+    # ─── Text Normalization (legacy, now handled by TextCleaner) ─────────────
 
     def normalize(self, text: str) -> str:
-        """Clean and normalize extracted text."""
-        # Normalize whitespace
-        text = re.sub(r"\r\n", "\n", text)
-        text = re.sub(r"\r", "\n", text)
-        text = re.sub(r"\t", " ", text)
-        text = re.sub(r" {2,}", " ", text)
-        text = re.sub(r"\n{3,}", "\n\n", text)
-
-        # Remove null bytes and non-printable chars (keep unicode)
-        text = re.sub(r"\x00", "", text)
-        text = re.sub(r"[\x01-\x08\x0b\x0c\x0e-\x1f\x7f]", "", text)
-
-        return text.strip()
+        """Clean and normalize extracted text (legacy compatibility)."""
+        return self.cleaner.clean(text)

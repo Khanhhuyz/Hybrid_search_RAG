@@ -31,6 +31,9 @@ class VectorStoreService:
                 url=settings.QDRANT_URL,
                 api_key=settings.QDRANT_API_KEY,
             )
+        elif settings.QDRANT_HOST:
+            logger.info(f"Connecting to Qdrant via host: {settings.QDRANT_HOST}:{settings.QDRANT_PORT}")
+            self.client = QdrantClient(host=settings.QDRANT_HOST, port=settings.QDRANT_PORT)
         else:
             settings.QDRANT_PATH.mkdir(parents=True, exist_ok=True)
             self.client = QdrantClient(path=str(settings.QDRANT_PATH))
@@ -208,6 +211,14 @@ class VectorStoreService:
 
     async def purge_orphaned_vectors(self, active_document_ids: set):
         """Remove points in Qdrant whose document_id is no longer in active_document_ids."""
+        # An empty metadata database can mean a missing/wrong volume, not that every
+        # vector should be deleted. Destructive reconciliation must never infer that
+        # intent from an empty set during startup.
+        if not active_document_ids:
+            logger.warning(
+                "Skipping orphan-vector purge because no active documents were found"
+            )
+            return 0
         try:
             res = await asyncio.to_thread(
                 self.client.scroll,
@@ -227,8 +238,10 @@ class VectorStoreService:
                     points_selector=orphaned,
                 )
                 logger.info(f"Purged {len(orphaned)} orphaned vectors from Qdrant")
+            return len(orphaned)
         except Exception as e:
             logger.warning(f"Failed to purge orphaned vectors: {e}")
+            return 0
 
     async def collection_info(self) -> dict:
         info = await asyncio.to_thread(self.client.get_collection, self.collection)

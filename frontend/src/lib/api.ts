@@ -1,6 +1,7 @@
 /**
- * GRAG API Client
+ * GRAG API Client (v2)
  * Type-safe HTTP client for all backend endpoints.
+ * Supports search_type, confidence scoring, communities, and monitoring.
  */
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api/v1";
@@ -8,6 +9,7 @@ const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api/v
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 export type ProcessingStatus = "pending" | "processing" | "completed" | "failed";
+export type SearchType = "local" | "global" | "hybrid" | "auto";
 
 export interface Document {
   id: string;
@@ -74,7 +76,11 @@ export interface ChatResponse {
   semantic_chunks_used: number;
   graph_nodes_used: number;
   model_used: string;
-  retrieval_mode: "semantic" | "graph" | "hybrid";
+  retrieval_mode: "semantic" | "graph" | "hybrid" | "global";
+  query_type?: string;
+  confidence_score?: number;
+  timings_ms?: Record<string, number>;
+  warnings?: string[];
 }
 
 export interface GraphNode {
@@ -83,6 +89,7 @@ export interface GraphNode {
   type: string;
   document_ids: string[];
   properties: Record<string, unknown>;
+  community_id?: number;
 }
 
 export interface GraphEdge {
@@ -91,6 +98,7 @@ export interface GraphEdge {
   relation: string;
   weight: number;
   document_ids: string[];
+  description?: string;
 }
 
 export interface GraphData {
@@ -106,12 +114,35 @@ export interface GraphStats {
   entity_types: Record<string, number>;
 }
 
+export interface CommunityReport {
+  community_id: number;
+  level: number;
+  title: string;
+  summary: string;
+  key_findings: string[];
+  main_entities: string[];
+  importance_score: number;
+}
+
+export interface MonitoringStats {
+  total_queries: number;
+  error_count: number;
+  error_rate: number;
+  avg_latency_ms: number;
+  avg_confidence: number;
+  query_type_distribution: Record<string, number>;
+  retrieval_mode_distribution: Record<string, number>;
+  stage_latencies: Record<string, { avg_ms: number; min_ms: number; max_ms: number; count: number }>;
+  recent_queries_count: number;
+}
+
 export interface HealthStatus {
   status: string;
   version: string;
   services: {
-    ollama: { status: string; model?: string };
-    qdrant: { status: string };
+    ollama: { status: string; model?: string } | string;
+    qdrant: { status: string } | string;
+    neo4j: string;
   };
 }
 
@@ -200,7 +231,8 @@ export const chatApi = {
     history: ChatMessage[] = [],
     useGraph = true,
     topK = 5,
-    documentIds?: string[]
+    documentIds?: string[],
+    searchType: SearchType = "auto"
   ): Promise<ChatResponse> =>
     request("/chat", {
       method: "POST",
@@ -210,6 +242,7 @@ export const chatApi = {
         use_graph: useGraph,
         top_k: topK,
         document_ids: documentIds,
+        search_type: searchType,
       }),
     }),
 
@@ -221,7 +254,9 @@ export const chatApi = {
     documentIds: string[] | undefined,
     onMetadata: (metadata: Partial<ChatResponse>) => void,
     onToken: (token: string) => void,
-    onError: (error: string) => void
+    onError: (error: string) => void,
+    searchType: SearchType = "auto",
+    onDone?: (data: { confidence_score?: number; warnings?: string[]; timings_ms?: Record<string, number> }) => void
   ): Promise<void> => {
     const url = `${API_BASE}/chat/stream`;
     const response = await fetch(url, {
@@ -233,6 +268,7 @@ export const chatApi = {
         use_graph: useGraph,
         top_k: topK,
         document_ids: documentIds,
+        search_type: searchType,
       }),
     });
 
@@ -265,6 +301,8 @@ export const chatApi = {
               onMetadata(parsed.data);
             } else if (parsed.type === "token") {
               onToken(parsed.data.text);
+            } else if (parsed.type === "done" && onDone) {
+              onDone(parsed.data);
             } else if (parsed.type === "error") {
               onError(parsed.data.error);
             }
@@ -297,6 +335,22 @@ export const graphApi = {
 
   relationships: (relationType?: string, limit = 50): Promise<{ relationships: unknown[]; total: number }> =>
     request(`/graph/relationships?limit=${limit}${relationType ? `&relation_type=${relationType}` : ""}`),
+
+  communities: (level?: number, limit = 50): Promise<{ communities: CommunityReport[]; total: number }> =>
+    request(`/graph/communities?limit=${limit}${level !== undefined ? `&level=${level}` : ""}`),
+
+  detectCommunities: (): Promise<{ status: string; communities_detected: number; message: string }> =>
+    request("/graph/communities/detect", { method: "POST" }),
+};
+
+// ─── Monitoring API ───────────────────────────────────────────────────────────
+
+export const monitoringApi = {
+  stats: (): Promise<MonitoringStats> =>
+    request("/monitoring/stats"),
+
+  recentQueries: (limit = 20): Promise<{ queries: unknown[] }> =>
+    request(`/monitoring/queries?limit=${limit}`),
 };
 
 // ─── Health API ───────────────────────────────────────────────────────────────

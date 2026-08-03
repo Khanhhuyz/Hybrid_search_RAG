@@ -1,5 +1,5 @@
 """
-GRAG FastAPI Application Entry Point
+GRAG FastAPI Application Entry Point (v2)
 """
 import asyncio
 import logging
@@ -11,8 +11,8 @@ from fastapi.responses import JSONResponse
 
 from app.config import settings
 from app.database import init_db
-from app.dependencies import init_services, get_vector_store
-from app.api import documents, search, graph
+from app.dependencies import init_services, get_vector_store, get_graph_builder
+from app.api import documents, search, graph, evaluation
 
 # ─── Logging ─────────────────────────────────────────────────────────────────
 
@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup and shutdown hooks with fault tolerance."""
-    logger.info("🚀 Starting GRAG System...")
+    logger.info("🚀 Starting GRAG System v2...")
 
     # Initialize database tables
     try:
@@ -64,8 +64,27 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"⚠️ Vector store degraded or not reachable on startup: {e}")
 
-    logger.info(f"🌐 GRAG API running on http://{settings.HOST}:{settings.PORT}{settings.API_PREFIX}")
+    # Check Neo4j connectivity
+    try:
+        gb = get_graph_builder()
+        if gb and gb.neo4j.is_connected:
+            logger.info("✅ Neo4j connected")
+        else:
+            logger.warning("⚠️ Neo4j not connected — graph features degraded")
+    except Exception as e:
+        logger.warning(f"⚠️ Neo4j check failed: {e}")
+
+    logger.info(f"🌐 GRAG API v2 running on http://{settings.HOST}:{settings.PORT}{settings.API_PREFIX}")
     yield
+
+    # Shutdown: close Neo4j driver
+    try:
+        gb = get_graph_builder()
+        if gb and gb.neo4j:
+            gb.neo4j.close()
+            logger.info("👋 Neo4j connection closed")
+    except Exception:
+        pass
 
     logger.info("👋 Shutting down GRAG System...")
 
@@ -75,7 +94,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title=settings.APP_NAME,
     version=settings.APP_VERSION,
-    description="Mini GraphRAG System — Semantic Search + Knowledge Graph + LLM",
+    description="Production-Grade GraphRAG System — Semantic Search + Knowledge Graph + Communities + LLM",
     docs_url="/docs",
     redoc_url="/redoc",
     lifespan=lifespan,
@@ -104,18 +123,22 @@ async def add_author_watermark(request, call_next):
 app.include_router(documents.router, prefix=settings.API_PREFIX)
 app.include_router(search.router,    prefix=settings.API_PREFIX)
 app.include_router(graph.router,     prefix=settings.API_PREFIX)
+app.include_router(evaluation.router, prefix=settings.API_PREFIX)
 
 
 # ─── Health Check ────────────────────────────────────────────────────────────
 
 @app.get("/health", tags=["System"])
 async def health_check():
-    from app.dependencies import get_embedder, get_vector_store
+    from app.dependencies import get_embedder, get_vector_store, get_graph_builder
+
     embedder     = get_embedder()
     vector_store = get_vector_store()
+    graph_builder = get_graph_builder()
 
     ollama_status = "unavailable"
     qdrant_status = "unavailable"
+    neo4j_status  = "unavailable"
 
     if embedder:
         try:
@@ -131,10 +154,22 @@ async def health_check():
             logger.warning(f"Qdrant health check timed out or failed: {e}")
             qdrant_status = f"error: {str(e)}"
 
+    if graph_builder:
+        try:
+            neo4j_status = graph_builder.neo4j.health_check()
+        except Exception as e:
+            neo4j_status = f"error: {str(e)}"
+
     is_ollama_ok = ollama_status == "ok" or (isinstance(ollama_status, dict) and ollama_status.get("status") == "ok")
     is_qdrant_ok = qdrant_status == "ok" or (isinstance(qdrant_status, dict) and qdrant_status.get("status") == "ok")
-    
-    overall_status = "ok" if (is_ollama_ok and is_qdrant_ok) else "degraded"
+    is_neo4j_ok  = neo4j_status == "ok"
+
+    if is_ollama_ok and is_qdrant_ok and is_neo4j_ok:
+        overall_status = "ok"
+    elif is_ollama_ok and is_qdrant_ok:
+        overall_status = "degraded"
+    else:
+        overall_status = "unhealthy"
 
     return {
         "status": overall_status,
@@ -144,6 +179,7 @@ async def health_check():
         "services": {
             "ollama":  ollama_status,
             "qdrant":  qdrant_status,
+            "neo4j":   neo4j_status,
         },
     }
 
@@ -157,4 +193,18 @@ async def root():
         "license": "CC BY-NC 4.0",
         "docs":    "/docs",
         "api":     settings.API_PREFIX,
+        "features": [
+            "Document Ingestion (PDF, DOCX, TXT, MD)",
+            "Intelligent Chunking with Section Detection",
+            "Vector Search (Qdrant + nomic-embed-text)",
+            "Knowledge Graph (Neo4j)",
+            "Leiden Community Detection",
+            "LLM-powered Community Reports",
+            "Local Search (entity-focused)",
+            "Global Search (Map-Reduce)",
+            "Hybrid Search (Vector + Graph + RRF)",
+            "SSE Streaming",
+            "Confidence Scoring",
+            "Runtime Monitoring",
+        ],
     }

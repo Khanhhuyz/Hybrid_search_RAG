@@ -19,3 +19,7 @@ frontend/.env.local
 # OS files
 .DS_Store
 Thumbs.db
+
+# Runtime logs
+*.log
+backend_logs.txt

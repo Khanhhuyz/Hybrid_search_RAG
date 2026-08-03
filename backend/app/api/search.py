@@ -1,16 +1,15 @@
 """
-Search API
-Endpoints for semantic search, graph search, and hybrid GraphRAG chat.
+Search API (v2)
+Endpoints for semantic search, graph search, local/global/hybrid GraphRAG chat,
+and monitoring stats.
 """
 import logging
 from typing import Optional, List
 
 from fastapi import APIRouter, HTTPException, Depends, Query
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from fastapi.responses import StreamingResponse
 
 from app.config import settings
-from app.database import get_db, DocumentModel
 from app.schemas import (
     SearchRequest,
     SearchResponse,
@@ -20,9 +19,12 @@ from app.schemas import (
     ChatResponse,
     Citation,
     GraphContext,
+    MonitoringStats,
+    QueryLogEntry,
 )
 from app.services.rag_pipeline import RAGPipeline
-from app.dependencies import get_rag_pipeline
+from app.services.monitor import Monitor
+from app.dependencies import get_rag_pipeline, get_monitor
 
 router = APIRouter(tags=["Search"])
 logger = logging.getLogger(__name__)
@@ -78,24 +80,22 @@ async def graph_search(
     entity_ids = rag.graph_builder.find_entities_in_text(request.query)
     context_items = rag.graph_builder.get_related_context(entity_ids, depth=2)
 
-    # Convert graph context to SearchResult format (pseudo-chunks)
-    results = []
-    for i, item in enumerate(context_items[:request.top_k]):
-        results.append(
-            SearchResult(
-                chunk=ChunkResponse(
-                    id=f"graph_{i}",
-                    document_id="knowledge_graph",
-                    content=item["text"],
-                    chunk_index=i,
-                    page_number=None,
-                    section=None,
-                    score=1.0,
-                ),
+    results = [
+        SearchResult(
+            chunk=ChunkResponse(
+                id=f"graph_{i}",
+                document_id="knowledge_graph",
+                content=item["text"],
+                chunk_index=i,
+                page_number=None,
+                section=None,
                 score=1.0,
-                document_filename="Knowledge Graph",
-            )
+            ),
+            score=1.0,
+            document_filename="Knowledge Graph",
         )
+        for i, item in enumerate(context_items[:request.top_k])
+    ]
 
     return SearchResponse(
         query=request.query,
@@ -105,21 +105,28 @@ async def graph_search(
     )
 
 
-# ─── Chat (GraphRAG) ──────────────────────────────────────────────────────────
+# ─── Chat (GraphRAG v2) ──────────────────────────────────────────────────────
 
 @router.post("/chat", response_model=ChatResponse)
 async def chat(
     request: ChatRequest,
     rag: RAGPipeline = Depends(get_rag_pipeline),
 ):
-    """Ask a question using the full GraphRAG pipeline (non-streaming)."""
+    """Ask a question using the full GraphRAG pipeline (non-streaming).
+    Supports search_type: local, global, hybrid, or auto."""
     try:
+        # Convert search_type
+        search_type = None
+        if request.search_type and request.search_type.value != "auto":
+            search_type = request.search_type.value
+
         result = await rag.answer(
             question=request.question,
             top_k=request.top_k,
             use_graph=request.use_graph,
             document_ids=request.document_ids,
             history=request.history,
+            search_type=search_type,
         )
 
         citations = [
@@ -149,6 +156,10 @@ async def chat(
             graph_nodes_used=result["graph_nodes_used"],
             model_used=result["model_used"],
             retrieval_mode=result["retrieval_mode"],
+            query_type=result.get("query_type", "hybrid"),
+            confidence_score=result.get("confidence_score", 0.0),
+            timings_ms=result.get("timings_ms", {}),
+            warnings=result.get("warnings", []),
         )
     except Exception as e:
         logger.error(f"Chat error: {e}", exc_info=True)
@@ -160,16 +171,20 @@ async def chat_stream(
     request: ChatRequest,
     rag: RAGPipeline = Depends(get_rag_pipeline),
 ):
-    """Ask a question using GraphRAG with real-time SSE token streaming."""
-    from fastapi.responses import StreamingResponse
-
+    """Ask a question using GraphRAG with real-time SSE token streaming.
+    Supports search_type: local, global, hybrid, or auto."""
     try:
+        search_type = None
+        if request.search_type and request.search_type.value != "auto":
+            search_type = request.search_type.value
+
         generator = rag.answer_stream(
             question=request.question,
             top_k=request.top_k,
             use_graph=request.use_graph,
             document_ids=request.document_ids,
             history=request.history,
+            search_type=search_type,
         )
         return StreamingResponse(
             generator,
@@ -184,3 +199,21 @@ async def chat_stream(
         logger.error(f"Chat stream error: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"RAG streaming error: {str(e)}")
 
+
+# ─── Monitoring ───────────────────────────────────────────────────────────────
+
+@router.get("/monitoring/stats", response_model=MonitoringStats)
+async def get_monitoring_stats(
+    monitor: Monitor = Depends(get_monitor),
+):
+    """Get runtime monitoring statistics: latency, error rates, query distribution."""
+    return monitor.get_stats()
+
+
+@router.get("/monitoring/queries")
+async def get_recent_queries(
+    limit: int = Query(20, ge=1, le=100),
+    monitor: Monitor = Depends(get_monitor),
+):
+    """Get recent query logs for debugging and analysis."""
+    return {"queries": monitor.get_recent_queries(limit=limit)}

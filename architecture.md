@@ -317,3 +317,17 @@ sequenceDiagram
         FE-->>User: Display token
     end
 ```
+
+---
+
+## 10. Evaluation & Maintenance
+
+Labelled cases are evaluated through `POST /api/v1/evaluation/run`. Retrieval
+quality uses precision, recall, F1, hit rate, and reciprocal rank; answer overlap
+uses Unicode-aware token F1. Runtime latency, confidence, routing distribution,
+and errors are available under `/api/v1/monitoring/*`.
+
+```text
+Labelled dataset -> offline evaluation -> error analysis
+-> tune chunking/schema/retrieval/prompt -> re-index -> compare regression metrics
+```

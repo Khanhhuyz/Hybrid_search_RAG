@@ -14,7 +14,7 @@ BASE_DIR = Path(__file__).parent.parent.parent
 class Settings(BaseSettings):
     # ─── Application ─────────────────────────────────────────────────
     APP_NAME: str = "GRAG - GraphRAG System"
-    APP_VERSION: str = "1.0.0"
+    APP_VERSION: str = "2.0.0"
     DEBUG: bool = False
     LOG_LEVEL: str = "INFO"
     API_PREFIX: str = "/api/v1"
@@ -43,8 +43,16 @@ class Settings(BaseSettings):
     QDRANT_COLLECTION: str = "grag_chunks"
     QDRANT_URL: Optional[str] = None
     QDRANT_API_KEY: Optional[str] = None
+    QDRANT_HOST: Optional[str] = None
+    QDRANT_PORT: int = 6333
 
-    # ─── Knowledge Graph ──────────────────────────────────────────────
+    # ─── Neo4j Knowledge Graph ────────────────────────────────────────
+    NEO4J_URI: str = "bolt://localhost:7687"
+    NEO4J_USER: str = "neo4j"
+    NEO4J_PASSWORD: str = "grag_password_2024"
+    NEO4J_DATABASE: str = "neo4j"
+
+    # ─── Legacy NetworkX (fallback) ───────────────────────────────────
     GRAPH_FILE: Path = BASE_DIR / "data" / "knowledge_graph.json"
 
     # ─── Chunking ─────────────────────────────────────────────────────
@@ -61,6 +69,20 @@ class Settings(BaseSettings):
     MAX_CONTEXT_TOKENS: int = 4000
     LLM_TEMPERATURE: float = 0.1
     LLM_MAX_TOKENS: int = 1024
+
+    # ─── Community Detection ──────────────────────────────────────────
+    COMMUNITY_RESOLUTION: float = 1.0
+    COMMUNITY_MIN_SIZE: int = 2
+    COMMUNITY_MAX_REPORT_TOKENS: int = 2000
+
+    # ─── Query Processing ─────────────────────────────────────────────
+    QUERY_CLASSIFICATION_ENABLED: bool = True
+    GLOBAL_SEARCH_MAP_BATCH_SIZE: int = 5
+    GLOBAL_SEARCH_MAX_COMMUNITIES: int = 50
+
+    # ─── Monitoring ───────────────────────────────────────────────────
+    MONITORING_ENABLED: bool = True
+    MAX_QUERY_LOG_SIZE: int = 1000
 
     class Config:
         env_file = ".env"

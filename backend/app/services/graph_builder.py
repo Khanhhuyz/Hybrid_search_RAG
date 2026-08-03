@@ -1,26 +1,37 @@
 """
-Knowledge Graph Builder
+Knowledge Graph Builder (v2)
 Extracts entities and relationships from text chunks using Ollama LLM,
-then stores them in a NetworkX graph persisted as JSON.
+stores them in Neo4j (with NetworkX fallback), runs entity normalization,
+community detection, and report generation.
 """
 import json
 import logging
 import re
-import uuid
-from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple
 
-import networkx as nx
 import httpx
 
 from app.config import settings
+from app.services.neo4j_store import Neo4jStore
+from app.services.entity_normalizer import EntityNormalizer
+from app.services.community_detector import CommunityDetector
+from app.services.community_reporter import CommunityReporter
 
 logger = logging.getLogger(__name__)
 
 # ─── Supported Entity & Relation Types ────────────────────────────────────────
 
-ENTITY_TYPES = ["PERSON", "ORGANIZATION", "COURSE", "DEPARTMENT", "PRODUCT", "LOCATION", "CONCEPT"]
-RELATION_TYPES = ["WORKS_AT", "BELONGS_TO", "HAS_PREREQUISITE", "MENTIONS", "RELATED_TO", "LOCATED_IN"]
+ENTITY_TYPES = [
+    "PERSON", "ORGANIZATION", "COURSE", "DEPARTMENT",
+    "PRODUCT", "LOCATION", "CONCEPT", "PROJECT",
+    "TECHNOLOGY", "EVENT", "DOCUMENT",
+]
+
+RELATION_TYPES = [
+    "WORKS_AT", "BELONGS_TO", "HAS_PREREQUISITE", "MENTIONS",
+    "RELATED_TO", "LOCATED_IN", "MANAGES", "USES",
+    "CREATED_BY", "DEPENDS_ON", "HAS_RISK", "PART_OF",
+]
 
 EXTRACTION_PROMPT = """You are an expert information extractor. Analyze the following text and extract entities and relationships.
 
@@ -30,6 +41,7 @@ Relationship types: {relation_types}
 Rules:
 - Only extract clearly stated entities and relationships
 - Use UPPERCASE for entity labels (normalize names)
+- Include a brief description for each relationship
 - Return ONLY valid JSON, no other text
 
 Text:
@@ -43,52 +55,52 @@ Return JSON in exactly this format:
     {{"id": "unique_id", "label": "ENTITY NAME", "type": "ENTITY_TYPE"}}
   ],
   "relationships": [
-    {{"source": "ENTITY NAME 1", "target": "ENTITY NAME 2", "relation": "RELATION_TYPE"}}
+    {{"source": "ENTITY NAME 1", "target": "ENTITY NAME 2", "relation": "RELATION_TYPE", "description": "brief description of the relationship"}}
   ]
 }}"""
 
 
 class GraphBuilderService:
-    """Build and persist a NetworkX knowledge graph from document chunks."""
+    """Build and manage knowledge graph with Neo4j, entity normalization, and community detection."""
 
     def __init__(self):
-        self.graph_file = settings.GRAPH_FILE
-        self.graph: nx.DiGraph = self._load_graph()
+        # Neo4j store
+        self.neo4j = Neo4jStore()
 
-    # ─── Graph Persistence ────────────────────────────────────────────────────
+        # Entity normalization
+        self.normalizer = EntityNormalizer()
 
-    def _load_graph(self) -> nx.DiGraph:
-        if self.graph_file.exists():
-            try:
-                data = json.loads(self.graph_file.read_text(encoding="utf-8"))
-                G = nx.node_link_graph(data, edges="edges")
-                logger.info(f"Loaded graph: {G.number_of_nodes()} nodes, {G.number_of_edges()} edges")
-                return G
-            except Exception as e:
-                logger.warning(f"Failed to load graph, starting fresh: {e}")
-        return nx.DiGraph()
+        # Community detection
+        self.community_detector = CommunityDetector(
+            resolution=settings.COMMUNITY_RESOLUTION,
+            min_community_size=settings.COMMUNITY_MIN_SIZE,
+        )
 
-    def save_graph(self):
-        data = nx.node_link_data(self.graph, edges="edges")
-        self.graph_file.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        # Community report generator
+        self.community_reporter = CommunityReporter()
+
+        logger.info(
+            f"GraphBuilder initialized — Neo4j: {'connected' if self.neo4j.is_connected else 'disconnected'}"
+        )
 
     # ─── Extraction ───────────────────────────────────────────────────────────
 
     async def process_chunks(self, chunks: List[Dict[str, Any]]) -> int:
         """
-        Extract entities/relationships from chunks and add to graph in parallel.
+        Extract entities/relationships from chunks, normalize, store in Neo4j.
         Returns count of entities added.
         """
         import asyncio
-        total_added = 0
-        semaphore = asyncio.Semaphore(3)  # Limit to 3 concurrent Ollama LLM requests to avoid overloading
 
-        async def process_single_chunk(chunk: Dict[str, Any]) -> Optional[Tuple[Dict, str]]:
+        total_added = 0
+        semaphore = asyncio.Semaphore(3)
+
+        async def process_single_chunk(chunk: Dict[str, Any]) -> Optional[Tuple[Dict, str, str]]:
             async with semaphore:
                 try:
                     result = await self._extract_from_text(chunk["content"])
                     if result:
-                        return result, chunk["document_id"]
+                        return result, chunk["document_id"], chunk.get("id", "")
                 except Exception as e:
                     logger.error(f"Graph extraction failed for chunk {chunk.get('id')}: {e}")
             return None
@@ -98,13 +110,16 @@ class GraphBuilderService:
 
         for res in results:
             if res:
-                extraction, doc_id = res
-                added = self._merge_into_graph(extraction, doc_id)
+                extraction, doc_id, chunk_id = res
+                added = self._merge_into_graph(extraction, doc_id, chunk_id)
                 total_added += added
 
         if total_added > 0:
-            self.save_graph()
-            logger.info(f"Graph updated: +{total_added} entities. Total: {self.graph.number_of_nodes()} nodes")
+            logger.info(f"Graph updated: +{total_added} entities")
+
+            # Run community detection after significant updates
+            if total_added >= 3:
+                await self.run_community_pipeline()
 
         return total_added
 
@@ -113,7 +128,7 @@ class GraphBuilderService:
         prompt = EXTRACTION_PROMPT.format(
             entity_types=", ".join(ENTITY_TYPES),
             relation_types=", ".join(RELATION_TYPES),
-            text=text[:1500],  # Limit to avoid context overflow
+            text=text[:1500],
         )
 
         payload = {
@@ -132,7 +147,6 @@ class GraphBuilderService:
 
     def _parse_json_response(self, raw: str) -> Optional[Dict]:
         """Extract and parse JSON from LLM response."""
-        # Find JSON block
         match = re.search(r"\{[\s\S]*\}", raw)
         if not match:
             return None
@@ -146,60 +160,120 @@ class GraphBuilderService:
 
     # ─── Graph Operations ─────────────────────────────────────────────────────
 
-    def _merge_into_graph(self, extraction: Dict, document_id: str) -> int:
-        """Merge extracted entities and relationships into the graph."""
+    def _merge_into_graph(self, extraction: Dict, document_id: str, chunk_id: str = "") -> int:
+        """Normalize and merge extracted entities/relationships into Neo4j."""
         entities_added = 0
-        label_to_id = {}
+        raw_entities = extraction.get("entities", [])
+        raw_relationships = extraction.get("relationships", [])
 
-        for ent in extraction.get("entities", []):
-            label = str(ent.get("label", "")).upper().strip()
-            etype = str(ent.get("type", "CONCEPT")).upper()
-            if not label:
-                continue
+        # Normalize entities
+        existing_labels = []  # Could query Neo4j for existing labels
+        normalized_entities = self.normalizer.normalize_entities(raw_entities, existing_labels)
+        label_map = self.normalizer.get_label_map(normalized_entities)
 
+        # Normalize relationships
+        normalized_rels = self.normalizer.normalize_relationships(raw_relationships, label_map)
+
+        # Upsert entities into Neo4j
+        node_id_map = {}
+        for ent in normalized_entities:
+            label = ent["label"]
+            etype = ent["type"]
             node_id = f"{etype}::{label}"
-            label_to_id[label] = node_id
+            node_id_map[label] = node_id
 
-            if not self.graph.has_node(node_id):
-                self.graph.add_node(
-                    node_id,
-                    label=label,
-                    type=etype,
-                    document_ids=[document_id],
-                )
+            properties = {}
+            if chunk_id:
+                properties["source_chunk_ids"] = [chunk_id]
+
+            is_new = self.neo4j.upsert_entity(
+                node_id=node_id,
+                label=label,
+                entity_type=etype,
+                document_id=document_id,
+                properties=properties,
+            )
+            if is_new:
                 entities_added += 1
-            else:
-                # Merge document reference
-                existing_docs = self.graph.nodes[node_id].get("document_ids", [])
-                if document_id not in existing_docs:
-                    existing_docs.append(document_id)
-                    self.graph.nodes[node_id]["document_ids"] = existing_docs
 
-        for rel in extraction.get("relationships", []):
-            src_label = str(rel.get("source", "")).upper().strip()
-            tgt_label = str(rel.get("target", "")).upper().strip()
-            relation  = str(rel.get("relation", "RELATED_TO")).upper()
+        # Upsert relationships
+        for rel in normalized_rels:
+            src_id = node_id_map.get(rel["source"])
+            tgt_id = node_id_map.get(rel["target"])
 
-            src_id = label_to_id.get(src_label)
-            tgt_id = label_to_id.get(tgt_label)
-
-            if src_id and tgt_id and self.graph.has_node(src_id) and self.graph.has_node(tgt_id):
-                if not self.graph.has_edge(src_id, tgt_id):
-                    self.graph.add_edge(
-                        src_id, tgt_id,
-                        relation=relation,
-                        weight=1.0,
-                        document_ids=[document_id],
-                    )
-                else:
-                    # Increment weight for repeated co-occurrence
-                    self.graph[src_id][tgt_id]["weight"] = (
-                        self.graph[src_id][tgt_id].get("weight", 1.0) + 0.1
-                    )
+            if src_id and tgt_id:
+                self.neo4j.upsert_relationship(
+                    source_id=src_id,
+                    target_id=tgt_id,
+                    relation=rel["relation"],
+                    document_id=document_id,
+                    description=rel.get("description", ""),
+                )
 
         return entities_added
 
-    # ─── Query ────────────────────────────────────────────────────────────────
+    # ─── Community Pipeline ───────────────────────────────────────────────────
+
+    async def run_community_pipeline(self):
+        """Run full community detection + report generation pipeline."""
+        logger.info("Starting community detection pipeline...")
+
+        try:
+            # 1. Export graph data for igraph
+            graph_data = self.neo4j.get_all_entities_for_community_detection()
+            nodes = graph_data.get("nodes", [])
+            edges = graph_data.get("edges", [])
+
+            if len(nodes) < 3:
+                logger.info("Too few nodes for community detection, skipping")
+                return
+
+            # 2. Run Leiden community detection
+            result = self.community_detector.detect(nodes, edges)
+            levels = result.get("levels", [])
+
+            if not levels:
+                logger.warning("No communities detected")
+                return
+
+            # 3. Assign communities to entities in Neo4j
+            for level_data in levels:
+                for community in level_data.get("communities", []):
+                    for member in community.get("members", []):
+                        self.neo4j.set_entity_community(
+                            node_id=member["node_id"],
+                            community_id=community["community_id"],
+                            level=level_data["level"],
+                        )
+
+            # 4. Generate community reports (use level 1 = medium resolution)
+            target_level = levels[1] if len(levels) > 1 else levels[0]
+            communities = target_level.get("communities", [])
+
+            reports = await self.community_reporter.generate_reports_batch(communities)
+
+            # 5. Store reports in Neo4j
+            for report in reports:
+                self.neo4j.upsert_community_report(
+                    community_id=report["community_id"],
+                    level=report.get("level", 0),
+                    title=report.get("title", ""),
+                    summary=report.get("summary", ""),
+                    key_findings=report.get("key_findings", []),
+                    main_entities=report.get("main_entities", []),
+                    importance_score=report.get("importance_score", 0.5),
+                )
+
+            logger.info(
+                f"Community pipeline complete: {len(levels)} levels, "
+                f"{sum(len(l['communities']) for l in levels)} communities, "
+                f"{len(reports)} reports generated"
+            )
+
+        except Exception as e:
+            logger.error(f"Community pipeline failed: {e}", exc_info=True)
+
+    # ─── Query (delegated to Neo4jStore) ──────────────────────────────────────
 
     def get_graph_data(
         self,
@@ -207,138 +281,24 @@ class GraphBuilderService:
         max_nodes: int = 200,
     ) -> Dict:
         """Return nodes and edges for visualization."""
-        G = self.graph
-
-        if document_ids:
-            nodes = [
-                n for n, d in G.nodes(data=True)
-                if any(did in d.get("document_ids", []) for did in document_ids)
-            ]
-            G = G.subgraph(nodes)
-
-        # Limit for large graphs
-        if G.number_of_nodes() > max_nodes:
-            # Keep highest-degree nodes
-            top_nodes = sorted(G.degree, key=lambda x: x[1], reverse=True)[:max_nodes]
-            G = G.subgraph([n for n, _ in top_nodes])
-
-        nodes = [
-            {
-                "id":           n,
-                "label":        d.get("label", n),
-                "type":         d.get("type", "CONCEPT"),
-                "document_ids": d.get("document_ids", []),
-                "properties":   {},
-            }
-            for n, d in G.nodes(data=True)
-        ]
-        edges = [
-            {
-                "source":       u,
-                "target":       v,
-                "relation":     d.get("relation", "RELATED_TO"),
-                "weight":       d.get("weight", 1.0),
-                "document_ids": d.get("document_ids", []),
-            }
-            for u, v, d in G.edges(data=True)
-        ]
-
-        return {
-            "nodes": nodes,
-            "edges": edges,
-            "total_nodes": G.number_of_nodes(),
-            "total_edges": G.number_of_edges(),
-        }
-
-    def get_entity_neighborhood(
-        self,
-        entity_name: str,
-        depth: int = 2,
-    ) -> Dict:
-        """Get all nodes within `depth` hops of a named entity."""
-        # Find matching node(s)
-        candidates = [
-            n for n, d in self.graph.nodes(data=True)
-            if entity_name.upper() in d.get("label", "").upper()
-        ]
-        if not candidates:
-            return {"nodes": [], "edges": [], "total_nodes": 0, "total_edges": 0}
-
-        # BFS to find neighborhood
-        neighborhood = set()
-        for seed in candidates:
-            try:
-                neighbors = nx.single_source_shortest_path_length(self.graph, seed, cutoff=depth)
-                neighborhood.update(neighbors.keys())
-                # Also check reverse direction
-                rev = self.graph.reverse()
-                rev_neighbors = nx.single_source_shortest_path_length(rev, seed, cutoff=depth)
-                neighborhood.update(rev_neighbors.keys())
-            except Exception:
-                neighborhood.add(seed)
-
-        return self.get_graph_data(max_nodes=100)
+        return self.neo4j.get_graph_data(document_ids=document_ids, max_nodes=max_nodes)
 
     def find_entities_in_text(self, text: str) -> List[str]:
         """Find known graph entities mentioned in a query text."""
-        text_upper = text.upper()
-        found = []
-        for node_id, data in self.graph.nodes(data=True):
-            label = data.get("label", "")
-            if label and len(label.strip()) >= 3 and label.upper() in text_upper:
-                found.append(node_id)
-        return found
+        return self.neo4j.find_entities_by_label(text)
 
     def get_related_context(self, entity_ids: List[str], depth: int = 1) -> List[Dict]:
         """Return textual context strings for graph neighborhood."""
-        context = []
-        for eid in entity_ids:
-            if not self.graph.has_node(eid):
-                continue
-            node_data = self.graph.nodes[eid]
-            label = node_data.get("label", eid)
-            etype = node_data.get("type", "CONCEPT")
-            context.append({"text": f"{label} is a {etype}", "source": "graph"})
+        return self.neo4j.get_related_context(entity_ids, depth=depth)
 
-            for _, tgt, edge_data in self.graph.out_edges(eid, data=True):
-                tgt_label = self.graph.nodes[tgt].get("label", tgt)
-                relation  = edge_data.get("relation", "RELATED_TO")
-                context.append({"text": f"{label} {relation.replace('_', ' ')} {tgt_label}", "source": "graph"})
-
-            for src, _, edge_data in self.graph.in_edges(eid, data=True):
-                src_label = self.graph.nodes[src].get("label", src)
-                relation  = edge_data.get("relation", "RELATED_TO")
-                context.append({"text": f"{src_label} {relation.replace('_', ' ')} {label}", "source": "graph"})
-
-        return context[:20]  # Limit context
+    def get_community_reports(self, level: Optional[int] = None, limit: int = 50) -> List[Dict]:
+        """Get community reports."""
+        return self.neo4j.get_community_reports(level=level, limit=limit)
 
     @property
     def stats(self) -> Dict:
-        return {
-            "nodes": self.graph.number_of_nodes(),
-            "edges": self.graph.number_of_edges(),
-            "entity_types": self._count_types(),
-        }
-
-    def _count_types(self) -> Dict[str, int]:
-        counts: Dict[str, int] = {}
-        for _, d in self.graph.nodes(data=True):
-            t = d.get("type", "UNKNOWN")
-            counts[t] = counts.get(t, 0) + 1
-        return counts
+        return self.neo4j.stats
 
     def delete_document_entities(self, document_id: str):
         """Remove all entities that belong only to this document."""
-        to_remove = []
-        for node_id, data in self.graph.nodes(data=True):
-            doc_ids = data.get("document_ids", [])
-            if document_id in doc_ids:
-                doc_ids.remove(document_id)
-                if not doc_ids:
-                    to_remove.append(node_id)
-                else:
-                    self.graph.nodes[node_id]["document_ids"] = doc_ids
-
-        self.graph.remove_nodes_from(to_remove)
-        self.save_graph()
-        logger.info(f"Removed {len(to_remove)} orphaned entities for document {document_id}")
+        self.neo4j.delete_document_entities(document_id)
