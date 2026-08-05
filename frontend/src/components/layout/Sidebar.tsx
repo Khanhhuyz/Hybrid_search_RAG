@@ -8,11 +8,13 @@ import {
   Share2,
   Search,
   Cpu,
+  WandSparkles,
 } from "lucide-react";
 
 const navItems = [
   { href: "/",        icon: LayoutDashboard, label: "Dashboard" },
   { href: "/chat",    icon: MessageSquare,   label: "Chat" },
+  { href: "/agent",   icon: WandSparkles,    label: "Agent Workspace" },
   { href: "/graph",   icon: Share2,          label: "Graph" },
   { href: "/search",  icon: Search,          label: "Search" },
 ];

@@ -179,6 +179,7 @@ class GlobalSearch:
             "model": settings.LLM_MODEL,
             "prompt": prompt,
             "stream": False,
+            "format": "json",
             "options": {"temperature": 0.0, "num_predict": 512},
         }
 

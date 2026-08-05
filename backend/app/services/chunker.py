@@ -79,6 +79,65 @@ class TextChunker:
         logger.info(f"Intelligent Chunked document {document_id} → {len(chunks)} chunks")
         return chunks
 
+    def chunk_pages(
+        self,
+        pages: List[Dict[str, Any]],
+        document_id: str,
+        document_filename: str,
+    ) -> List[Dict[str, Any]]:
+        """Create searchable child chunks with exact pages and retrievable parents."""
+        output: List[Dict[str, Any]] = []
+        global_index = 0
+        char_offset = 0
+        for page in pages:
+            page_number = int(page.get("page_number", 1))
+            text = page.get("text", "") or ""
+            sections = self._split_by_sections(text)
+            for section_title, section_text in sections:
+                if not section_text.strip():
+                    continue
+                # A parent is a coherent page/section window, while children stay
+                # small enough for accurate retrieval and reranking.
+                parent_parts = self._recursive_split(section_text, ["\n\n", "\n", ". ", " ", ""])
+                grouped, current = [], ""
+                for part in parent_parts:
+                    if current and len(current) + len(part) + 2 > settings.PARENT_CHUNK_SIZE:
+                        grouped.append(current)
+                        current = ""
+                    current = f"{current}\n\n{part}".strip()
+                if current:
+                    grouped.append(current)
+                for parent_text in grouped:
+                    parent_id = str(uuid.uuid4())
+                    children = self._split_section_content(parent_text, section_title)
+                    for child in children:
+                        child = child.strip()
+                        if not child:
+                            continue
+                        is_table = "[TABLE]" in child or ("|" in child and "---" in child)
+                        output.append({
+                            "id": str(uuid.uuid4()),
+                            "document_id": document_id,
+                            "content": child,
+                            "chunk_index": global_index,
+                            "page_number": page_number,
+                            "page_end": page_number,
+                            "section": section_title or self._detect_section(child),
+                            "parent_id": parent_id,
+                            "parent_content": parent_text,
+                            "chunk_type": "table" if is_table else "text",
+                            "char_start": char_offset,
+                            "char_end": char_offset + len(child),
+                            "token_count": self._estimate_tokens(child),
+                            "document_filename": document_filename,
+                            "metadata": {"extraction_source": page.get("source", "native")},
+                            "origin_sig": "quinc-fptu-cc-by-nc-4.0",
+                        })
+                        global_index += 1
+                        char_offset += len(child)
+        logger.info("Page-aware chunked document %s -> %d child chunks", document_id, len(output))
+        return output
+
     # ─── Internal Structural & Semantic Chunking Logic ───────────────────────
 
     def _split_by_sections(self, text: str) -> List[tuple]:

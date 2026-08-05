@@ -41,7 +41,7 @@ Relationship types: {relation_types}
 Rules:
 - Only extract clearly stated entities and relationships
 - Use UPPERCASE for entity labels (normalize names)
-- Include a brief description for each relationship
+- Include a short verbatim evidence span, confidence from 0 to 1, and temporal bounds when stated
 - Return ONLY valid JSON, no other text
 
 Text:
@@ -55,9 +55,20 @@ Return JSON in exactly this format:
     {{"id": "unique_id", "label": "ENTITY NAME", "type": "ENTITY_TYPE"}}
   ],
   "relationships": [
-    {{"source": "ENTITY NAME 1", "target": "ENTITY NAME 2", "relation": "RELATION_TYPE", "description": "brief description of the relationship"}}
+    {{"source": "ENTITY NAME 1", "target": "ENTITY NAME 2", "relation": "RELATION_TYPE", "description": "brief description", "evidence": "supporting text span", "confidence": 0.0, "valid_from": null, "valid_to": null}}
   ]
 }}"""
+
+
+def build_extraction_payload(prompt: str) -> Dict[str, Any]:
+    """Build a deterministic Ollama request constrained to a JSON object."""
+    return {
+        "model": settings.LLM_MODEL,
+        "prompt": prompt,
+        "stream": False,
+        "format": "json",
+        "options": {"temperature": 0.0, "num_predict": 512},
+    }
 
 
 class GraphBuilderService:
@@ -85,7 +96,7 @@ class GraphBuilderService:
 
     # ─── Extraction ───────────────────────────────────────────────────────────
 
-    async def process_chunks(self, chunks: List[Dict[str, Any]]) -> int:
+    async def process_chunks(self, chunks: List[Dict[str, Any]], progress_callback=None) -> int:
         """
         Extract entities/relationships from chunks, normalize, store in Neo4j.
         Returns count of entities added.
@@ -106,13 +117,18 @@ class GraphBuilderService:
             return None
 
         tasks = [process_single_chunk(c) for c in chunks]
-        results = await asyncio.gather(*tasks)
-
-        for res in results:
+        processed = 0
+        for completed_task in asyncio.as_completed(tasks):
+            res = await completed_task
             if res:
                 extraction, doc_id, chunk_id = res
                 added = self._merge_into_graph(extraction, doc_id, chunk_id)
                 total_added += added
+            processed += 1
+            if progress_callback and (processed % 5 == 0 or processed == len(chunks)):
+                callback_result = progress_callback(processed, len(chunks))
+                if asyncio.iscoroutine(callback_result):
+                    await callback_result
 
         if total_added > 0:
             logger.info(f"Graph updated: +{total_added} entities")
@@ -131,12 +147,7 @@ class GraphBuilderService:
             text=text[:1500],
         )
 
-        payload = {
-            "model": settings.LLM_MODEL,
-            "prompt": prompt,
-            "stream": False,
-            "options": {"temperature": 0.0, "num_predict": 512},
-        }
+        payload = build_extraction_payload(prompt)
 
         async with httpx.AsyncClient(timeout=60.0) as client:
             resp = await client.post(f"{settings.OLLAMA_BASE_URL}/api/generate", json=payload)
@@ -147,15 +158,23 @@ class GraphBuilderService:
 
     def _parse_json_response(self, raw: str) -> Optional[Dict]:
         """Extract and parse JSON from LLM response."""
-        match = re.search(r"\{[\s\S]*\}", raw)
-        if not match:
-            return None
         try:
-            data = json.loads(match.group())
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            match = re.search(r"\{[\s\S]*\}", raw)
+            if not match:
+                logger.warning("No JSON object found in extraction response")
+                return None
+            try:
+                data = json.loads(match.group())
+            except json.JSONDecodeError as e:
+                logger.warning(f"JSON parse error: {e}")
+                return None
+
+        if isinstance(data, dict):
             if "entities" in data and "relationships" in data:
                 return data
-        except json.JSONDecodeError as e:
-            logger.warning(f"JSON parse error: {e}")
+        logger.warning("Extraction JSON is missing entities or relationships arrays")
         return None
 
     # ─── Graph Operations ─────────────────────────────────────────────────────
@@ -170,6 +189,18 @@ class GraphBuilderService:
         existing_labels = []  # Could query Neo4j for existing labels
         normalized_entities = self.normalizer.normalize_entities(raw_entities, existing_labels)
         label_map = self.normalizer.get_label_map(normalized_entities)
+        # Ollama may reference relationships by entity `id` even when the prompt
+        # asks for names. Resolve both shapes to the normalized entity label.
+        normalized_by_original = {
+            str(entity.get("original_label", "")).upper().strip(): entity["label"]
+            for entity in normalized_entities
+        }
+        for raw_entity in raw_entities:
+            entity_id = str(raw_entity.get("id", "")).upper().strip()
+            original_label = str(raw_entity.get("label", "")).upper().strip()
+            normalized_label = normalized_by_original.get(original_label)
+            if entity_id and normalized_label:
+                label_map[entity_id] = normalized_label
 
         # Normalize relationships
         normalized_rels = self.normalizer.normalize_relationships(raw_relationships, label_map)
@@ -202,12 +233,21 @@ class GraphBuilderService:
             tgt_id = node_id_map.get(rel["target"])
 
             if src_id and tgt_id:
+                try:
+                    confidence = float(rel.get("confidence", 0.5) or 0.5)
+                except (TypeError, ValueError):
+                    confidence = 0.5
                 self.neo4j.upsert_relationship(
                     source_id=src_id,
                     target_id=tgt_id,
                     relation=rel["relation"],
                     document_id=document_id,
                     description=rel.get("description", ""),
+                    chunk_id=chunk_id,
+                    evidence=rel.get("evidence", ""),
+                    confidence=confidence,
+                    valid_from=rel.get("valid_from"),
+                    valid_to=rel.get("valid_to"),
                 )
 
         return entities_added
@@ -266,7 +306,7 @@ class GraphBuilderService:
 
             logger.info(
                 f"Community pipeline complete: {len(levels)} levels, "
-                f"{sum(len(l['communities']) for l in levels)} communities, "
+                f"{sum(len(level['communities']) for level in levels)} communities, "
                 f"{len(reports)} reports generated"
             )
 

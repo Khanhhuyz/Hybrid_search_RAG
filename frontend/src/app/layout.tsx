@@ -1,9 +1,6 @@
 import type { Metadata } from "next";
-import { Inter } from "next/font/google";
 import "./globals.css";
 import { Sidebar } from "@/components/layout/Sidebar";
-
-const inter = Inter({ subsets: ["latin"], variable: "--font-inter" });
 
 export const metadata: Metadata = {
   title: "GRAG — GraphRAG System",
@@ -24,7 +21,7 @@ export default function RootLayout({
           }}
         />
       </head>
-      <body className={`${inter.variable} font-sans bg-[#0a0b0f] text-zinc-100 antialiased`}>
+      <body className="font-sans bg-[#0a0b0f] text-zinc-100 antialiased">
         <div className="flex h-screen overflow-hidden">
           <Sidebar />
           <main className="flex-1 overflow-auto">

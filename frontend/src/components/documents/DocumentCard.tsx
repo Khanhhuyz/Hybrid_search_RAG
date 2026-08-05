@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Document, documentsApi, ProcessingStatus } from "@/lib/api";
 import {
-  FileText, Trash2, Clock, CheckCircle2, AlertCircle, Loader2, Hash, GitBranch, Layers, Network
+  FileText, Trash2, Clock, CheckCircle2, AlertCircle, Loader2, Hash, GitBranch, Layers, Network, RotateCcw
 } from "lucide-react";
 
 interface DocumentCardProps {
@@ -27,6 +27,8 @@ function formatBytes(bytes: number): string {
 export function DocumentCard({ doc: initialDoc, onDelete }: DocumentCardProps) {
   const [doc, setDoc]           = useState<Document>(initialDoc);
   const [deleting, setDeleting] = useState(false);
+  const [retrying, setRetrying] = useState(false);
+  const [stalled, setStalled]   = useState(false);
   const pollRef                 = useRef<NodeJS.Timeout | null>(null);
 
   // Poll status while processing
@@ -35,15 +37,12 @@ export function DocumentCard({ doc: initialDoc, onDelete }: DocumentCardProps) {
       pollRef.current = setInterval(async () => {
         try {
           const status = await documentsApi.status(doc.id);
-          if (status.status !== doc.status || status.chunk_count !== doc.chunk_count || status.entity_count !== doc.entity_count) {
-            const updated = await documentsApi.get(doc.id);
-            setDoc(updated);
-          }
+          setDoc((current) => ({ ...current, ...status }));
           if (status.status === "completed" || status.status === "failed") {
             clearInterval(pollRef.current!);
           }
         } catch {}
-      }, 1000);
+      }, 3000);
     }
     return () => { if (pollRef.current) clearInterval(pollRef.current); };
   }, [doc.id, doc.status, doc.chunk_count, doc.entity_count]);
@@ -60,7 +59,36 @@ export function DocumentCard({ doc: initialDoc, onDelete }: DocumentCardProps) {
     }
   };
 
+  const handleRetry = async () => {
+    setRetrying(true);
+    try {
+      setDoc(await documentsApi.retry(doc.id));
+    } catch (error) {
+      alert(error instanceof Error ? error.message : "Failed to retry document");
+    } finally {
+      setRetrying(false);
+    }
+  };
+
   const cfg = statusConfig[doc.status];
+  const heartbeat = doc.heartbeat_at
+    ? new Date(/[zZ]|[+-]\d\d:\d\d$/.test(doc.heartbeat_at) ? doc.heartbeat_at : `${doc.heartbeat_at}Z`)
+    : null;
+  const heartbeatTime = heartbeat?.getTime() ?? null;
+  useEffect(() => {
+    const check = () => setStalled(
+      doc.status === "processing" && heartbeatTime !== null &&
+      Date.now() - heartbeatTime > 5 * 60 * 1000
+    );
+    const initial = window.setTimeout(check, 0);
+    const timer = window.setInterval(check, 3000);
+    return () => {
+      window.clearTimeout(initial);
+      window.clearInterval(timer);
+    };
+  }, [doc.status, heartbeatTime]);
+  const progress = doc.progress_total > 0
+    ? Math.min(100, Math.round(doc.progress_current * 100 / doc.progress_total)) : 0;
 
   return (
     <div className="bg-[#12141c]/90 backdrop-blur-md rounded-lg border border-zinc-800/80 p-4 transition-all duration-200 hover:border-zinc-700/80 group">
@@ -109,7 +137,13 @@ export function DocumentCard({ doc: initialDoc, onDelete }: DocumentCardProps) {
           </div>
         </div>
 
-        {/* Delete Action */}
+        <div className="flex items-center gap-1">
+        {(doc.status === "failed" || stalled || !!doc.error_message) && <button
+          onClick={handleRetry}
+          disabled={retrying}
+          className="p-1.5 rounded border border-amber-500/20 text-amber-400 hover:bg-amber-500/10"
+          title="Retry processing"
+        >{retrying ? <Loader2 size={15} className="animate-spin" /> : <RotateCcw size={15} />}</button>}
         <button
           onClick={handleDelete}
           disabled={deleting}
@@ -118,15 +152,23 @@ export function DocumentCard({ doc: initialDoc, onDelete }: DocumentCardProps) {
         >
           {deleting ? <Loader2 size={15} className="animate-spin" /> : <Trash2 size={15} />}
         </button>
+        </div>
       </div>
 
       {/* 4-Step Pipeline Stepper for Processing Documents */}
       {doc.status === "processing" && (
-        <div className="mt-3.5 pt-3 border-t border-zinc-800/60 grid grid-cols-4 gap-2 text-xs">
+        <div className="mt-3.5 pt-3 border-t border-zinc-800/60 space-y-2">
+        <div className="flex justify-between text-[11px] text-zinc-400">
+          <span className="capitalize">{stalled ? "Stalled" : doc.progress_stage}</span>
+          <span>{doc.progress_total > 0 ? `${doc.progress_current}/${doc.progress_total} (${progress}%)` : "Starting..."}</span>
+        </div>
+        <div className="h-1.5 rounded bg-zinc-800 overflow-hidden"><div className="h-full bg-indigo-500 transition-all" style={{ width: `${progress}%` }} /></div>
+        <div className="grid grid-cols-4 gap-2 text-xs">
           <StepBadge step={1} label="Read" active={true} done={true} icon={<FileText size={10} />} />
-          <StepBadge step={2} label="Chunk" active={true} done={doc.chunk_count > 0} icon={<Layers size={10} />} />
-          <StepBadge step={3} label="Embed" active={doc.chunk_count > 0} done={doc.chunk_count > 0} icon={<Hash size={10} />} />
-          <StepBadge step={4} label="Graph" active={doc.chunk_count > 0} done={doc.entity_count > 0} icon={<Network size={10} />} />
+          <StepBadge step={2} label="Chunk" active={doc.progress_stage === "extracting"} done={["embedding", "graph", "completed"].includes(doc.progress_stage)} icon={<Layers size={10} />} />
+          <StepBadge step={3} label="Embed" active={doc.progress_stage === "embedding"} done={["graph", "completed"].includes(doc.progress_stage)} icon={<Hash size={10} />} />
+          <StepBadge step={4} label="Graph" active={doc.progress_stage === "graph"} done={doc.progress_stage === "completed"} icon={<Network size={10} />} />
+        </div>
         </div>
       )}
 

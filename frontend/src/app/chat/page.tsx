@@ -48,14 +48,17 @@ export default function ChatPage() {
 
   // Load chat history from localStorage on mount
   useEffect(() => {
-    try {
-      const saved = localStorage.getItem(STORAGE_KEY);
-      if (saved) {
-        setMessages(JSON.parse(saved));
+    const timer = window.setTimeout(() => {
+      try {
+        const saved = localStorage.getItem(STORAGE_KEY);
+        if (saved) {
+          setMessages(JSON.parse(saved));
+        }
+      } catch {
+        // Ignore storage errors
       }
-    } catch {
-      // Ignore storage errors
-    }
+    }, 0);
+    return () => window.clearTimeout(timer);
   }, []);
 
   // Save chat history to localStorage whenever messages update

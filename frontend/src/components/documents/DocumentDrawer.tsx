@@ -26,20 +26,27 @@ export function DocumentDrawer({
 
   useEffect(() => {
     if (!documentId) return;
-
-    setLoading(true);
-    documentsApi
-      .getChunks(documentId)
-      .then((res) => {
-        setChunks(res.chunks || []);
-        if (res.filename) setFilename(res.filename);
-      })
-      .catch((err) => {
-        console.error("Failed to load document chunks:", err);
-      })
-      .finally(() => {
-        setLoading(false);
-      });
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      setLoading(true);
+      documentsApi
+        .getChunks(documentId)
+        .then((res) => {
+          if (cancelled) return;
+          setChunks(res.chunks || []);
+          if (res.filename) setFilename(res.filename);
+        })
+        .catch((err) => {
+          console.error("Failed to load document chunks:", err);
+        })
+        .finally(() => {
+          if (!cancelled) setLoading(false);
+        });
+    }, 0);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
   }, [documentId]);
 
   // Auto-scroll to highlighted chunk when chunks finish loading

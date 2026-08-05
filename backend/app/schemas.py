@@ -38,6 +38,10 @@ class DocumentResponse(DocumentBase):
     chunk_count: int
     entity_count: int
     error_message: Optional[str]
+    progress_stage: str = "queued"
+    progress_current: int = 0
+    progress_total: int = 0
+    heartbeat_at: Optional[datetime] = None
     created_at: datetime
     updated_at: datetime
 
@@ -207,6 +211,8 @@ class ChatResponse(BaseModel):
     confidence_score: float = 0.0
     timings_ms: Dict[str, float] = Field(default_factory=dict)
     warnings: List[str] = Field(default_factory=list)
+    groundedness_score: float = 0.0
+    claim_support: List[Dict[str, Any]] = Field(default_factory=list)
 
 
 # ─── Monitoring Schemas ───────────────────────────────────────────────────────
@@ -243,6 +249,14 @@ class EvaluationCase(BaseModel):
     relevant_chunk_ids: List[str] = Field(default_factory=list)
     answer: str = ""
     reference_answer: str = ""
+    citations: List[Dict[str, Any]] = Field(default_factory=list)
+    relevant_source_ids: List[str] = Field(default_factory=list)
+    expected_no_answer: bool = False
+    predicted_no_answer: bool = False
+    extracted_entities: List[str] = Field(default_factory=list)
+    expected_entities: List[str] = Field(default_factory=list)
+    extracted_relations: List[str] = Field(default_factory=list)
+    expected_relations: List[str] = Field(default_factory=list)
 
 
 class EvaluationRequest(BaseModel):

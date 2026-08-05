@@ -8,12 +8,17 @@ Post-processing pipeline for LLM-generated answers:
 import re
 import logging
 from typing import Dict, List, Optional
+from app.config import settings
+from app.services.grounding import GroundednessVerifier
 
 logger = logging.getLogger(__name__)
 
 
 class AnswerProcessor:
     """Post-process LLM answers for quality assurance."""
+
+    def __init__(self):
+        self.grounding = GroundednessVerifier()
 
     def process(
         self,
@@ -23,6 +28,7 @@ class AnswerProcessor:
         graph_nodes_used: int,
         retrieval_mode: str,
         question: str = "",
+        evidence_score: float = 0.0,
     ) -> Dict:
         """
         Full post-processing pipeline.
@@ -41,13 +47,15 @@ class AnswerProcessor:
         citation_valid, citation_warnings = self._validate_citations(answer, citations)
         warnings.extend(citation_warnings)
 
-        # 2. Confidence scoring
-        confidence = self._calculate_confidence(
-            answer=answer,
-            semantic_chunks_used=semantic_chunks_used,
-            graph_nodes_used=graph_nodes_used,
-            retrieval_mode=retrieval_mode,
-            citation_count=len(citations),
+        # 2. Verify every factual claim against the cited source text, then
+        # calibrate confidence from evidence quality instead of answer length.
+        verification = self.grounding.verify(answer, citations)
+        unsupported = [item for item in verification["claims"] if not item["supported"]]
+        if unsupported:
+            warnings.append(f"{len(unsupported)} claim(s) lack sufficient cited evidence")
+        confidence = self.grounding.calibrated_confidence(
+            evidence_score=evidence_score,
+            groundedness=verification["groundedness_score"],
         )
 
         # 3. Clean answer
@@ -57,12 +65,17 @@ class AnswerProcessor:
         if len(cleaned_answer.strip()) < 10:
             warnings.append("Answer is very short, may lack detail")
             confidence = min(confidence, 0.2)
+        if evidence_score < settings.RETRIEVAL_MIN_EVIDENCE_SCORE:
+            warnings.append("Retrieved evidence is insufficient for a reliable answer")
+            confidence = min(confidence, settings.NO_ANSWER_CONFIDENCE_THRESHOLD - 0.01)
 
         return {
             "answer": cleaned_answer,
             "confidence_score": round(confidence, 3),
             "citation_valid": citation_valid,
             "warnings": warnings,
+            "groundedness_score": verification["groundedness_score"],
+            "claim_support": verification["claims"],
         }
 
     def _validate_citations(

@@ -36,7 +36,10 @@ export default function GraphPage() {
     }
   };
 
-  useEffect(() => { loadFullGraph(); }, []);
+  useEffect(() => {
+    const timer = window.setTimeout(() => void loadFullGraph(), 0);
+    return () => window.clearTimeout(timer);
+  }, []);
 
   const handleEntitySearch = async (e: React.FormEvent) => {
     e.preventDefault();

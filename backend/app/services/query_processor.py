@@ -53,7 +53,9 @@ Return ONLY valid JSON:
 {{
   "query_type": "local" or "global" or "hybrid",
   "entities": ["entity1", "entity2"],
-  "rewritten_query": "improved version of the question for better search"
+  "rewritten_query": "improved version of the question for better search",
+  "subqueries": ["atomic question 1", "atomic question 2"],
+  "metadata_filters": {"filename_contains": null, "section_contains": null, "chunk_type": null}
 }}"""
 
 
@@ -91,6 +93,8 @@ class QueryProcessor:
         # 3. LLM-based classification for ambiguous cases
         extracted_entities = []
         rewritten_query = question
+        subqueries = self._decompose_heuristic(question)
+        metadata_filters = {}
         final_type = heuristic_type
 
         if self.use_llm_classification and settings.QUERY_CLASSIFICATION_ENABLED:
@@ -100,6 +104,8 @@ class QueryProcessor:
                     final_type = llm_result.get("query_type", heuristic_type)
                     extracted_entities = llm_result.get("entities", [])
                     rewritten_query = llm_result.get("rewritten_query", question)
+                    subqueries = llm_result.get("subqueries") or subqueries
+                    metadata_filters = llm_result.get("metadata_filters") or {}
             except Exception as e:
                 logger.warning(f"LLM classification failed, using heuristic: {e}")
                 final_type = heuristic_type
@@ -118,6 +124,8 @@ class QueryProcessor:
             "rewritten_query": rewritten_query,
             "extracted_entities": extracted_entities,
             "matched_graph_entities": matched_entities,
+            "subqueries": subqueries[:4],
+            "metadata_filters": {k: v for k, v in metadata_filters.items() if v},
         }
 
         logger.info(
@@ -126,6 +134,13 @@ class QueryProcessor:
             f"extracted={len(extracted_entities)}"
         )
         return result
+
+    @staticmethod
+    def _decompose_heuristic(question: str) -> List[str]:
+        """Split explicit multi-part questions without inventing new intent."""
+        parts = re.split(r"\s*(?:;|\?|\bvà\b|\band\b)\s*", question, flags=re.IGNORECASE)
+        clean = [part.strip(" ,?.") for part in parts if len(part.strip(" ,?.")) >= 5]
+        return clean if len(clean) > 1 else [question]
 
     # ─── Heuristic Classification ────────────────────────────────────────────
 
@@ -168,6 +183,7 @@ class QueryProcessor:
             "model": settings.LLM_MODEL,
             "prompt": prompt,
             "stream": False,
+            "format": "json",
             "options": {"temperature": 0.0, "num_predict": 256},
         }
 
@@ -191,6 +207,8 @@ class QueryProcessor:
                 "query_type": query_type,
                 "entities": data.get("entities", []),
                 "rewritten_query": data.get("rewritten_query", question),
+                "subqueries": [str(value) for value in data.get("subqueries", []) if str(value).strip()][:4],
+                "metadata_filters": data.get("metadata_filters", {}) if isinstance(data.get("metadata_filters", {}), dict) else {},
             }
         except json.JSONDecodeError:
             return None

@@ -23,6 +23,7 @@
 - **Dual Vector Storage Mode** — Supports local disk storage (`data/qdrant_storage`) or Qdrant Cloud via environment variables.
 - **Graph Visualizer** — D3.js visualization for extracted entities and relations with search and type filters.
 - **Local History** — Saves chat history in browser `localStorage`.
+- **Agent Workspace** — Creates grounded reports, plans, tables, and charts and exports them as Markdown, CSV, Excel, PDF, or SVG.
 - **Docker Compose Setup** — Container configuration files included for deployment.
 
 ---
@@ -133,6 +134,44 @@ hit rate, reciprocal rank, and Unicode-aware answer token F1. Keep labelled
 datasets in `data/evaluation/` and compare these metrics before and after changes
 to chunking, graph extraction, prompts, or retrieval.
 
+Run the checked-in regression gate directly:
+
+```bash
+cd backend
+python scripts/evaluate_golden.py evaluation/golden.sample.json
+```
+
+The evaluator reports NDCG/MRR/Recall, answer overlap, citation precision and
+recall, no-answer accuracy, plus graph entity/relation extraction metrics.
+Replace the sample with a reviewed domain dataset before tuning thresholds.
+
+## Advanced RAG pipeline
+
+Retrieval now combines independent dense, Unicode-aware BM25, and graph-ranked
+lists with weighted reciprocal-rank fusion. Candidates are reranked with the
+multilingual Ollama reranker (or a configured local CrossEncoder, with a deterministic
+lexical fallback), then expanded from precise child chunks to coherent parent sections.
+
+PDF ingestion preserves real page numbers and tables and can OCR scanned pages.
+OCR requires the Tesseract executable and the `vie`/`eng` language packs on the
+host. Graph relations retain document/chunk provenance, evidence, confidence,
+and optional validity dates. Generated answers are verified claim by claim and
+fall back to a no-answer response when evidence is below the configured gate.
+
+Existing indexed documents must be retried/re-indexed once to populate exact
+page, parent-child, table, and graph-provenance metadata.
+
+## Agent Workspace
+
+Open `http://localhost:3000/agent` to create a grounded work product from the
+indexed knowledge base. The backend stores bounded run history and generated
+artifacts under `data/outputs`; external actions remain disabled by default and
+require explicit approval when an integration is added.
+
+Agent API endpoints are available under `/api/v1/agent`, including capabilities,
+run history, artifact download, and the product-creation endpoint. Excel and PDF
+generation use `openpyxl` and `reportlab`, both declared in backend requirements.
+
 ---
 
 ## Docker Setup
@@ -148,8 +187,8 @@ docker compose up -d
 ```text
 GRAG/
 ├── backend/
-│   ├── app/          # Document, search, and graph routes
-│   │   ├── services/ # Chunker, RAG pipeline, vector store, graph builder
+│   ├── app/          # Document, search, graph, evaluation, and Agent routes
+│   │   ├── services/ # RAG services and bounded Agent orchestrator/artifact writers
 │   │   └── main.py   # FastAPI application with fault-tolerant lifespan & health check
 │   ├── tests/        # Unit tests for Chunker, RRF, and Citations
 │   ├── pyproject.toml # Linter & pytest configurations
@@ -160,7 +199,7 @@ GRAG/
 │       └── ci.yml    # GitHub Actions automated CI testing pipeline
 ├── frontend/
 │   ├── src/
-│   │   ├── app/          # Dashboard, chat, search, graph pages
+│   │   ├── app/          # Dashboard, chat, Agent, search, graph pages
 │   │   ├── components/   # UI components (DocumentDrawer, GraphVisualizer)
 │   │   └── lib/          # API client
 │   ├── Dockerfile

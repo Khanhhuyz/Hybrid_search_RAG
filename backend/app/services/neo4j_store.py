@@ -83,7 +83,7 @@ class Neo4jStore:
                 ELSE e.document_ids
             END,
             e.updated_at = datetime()
-        WITH e, NOT exists(e.updated_at) AS is_new
+        WITH e, e.updated_at IS NULL AS is_new
         RETURN is_new
         """
         params = {
@@ -114,6 +114,11 @@ class Neo4jStore:
         document_id: str,
         description: str = "",
         weight: float = 1.0,
+        chunk_id: str = "",
+        evidence: str = "",
+        confidence: float = 0.5,
+        valid_from: Optional[str] = None,
+        valid_to: Optional[str] = None,
     ):
         """Create or update a relationship between entities."""
         query = """
@@ -124,6 +129,11 @@ class Neo4jStore:
             r.weight = $weight,
             r.description = $description,
             r.document_ids = [$document_id],
+            r.source_chunk_ids = CASE WHEN $chunk_id = '' THEN [] ELSE [$chunk_id] END,
+            r.evidence = $evidence,
+            r.confidence = $confidence,
+            r.valid_from = $valid_from,
+            r.valid_to = $valid_to,
             r.created_at = datetime()
         ON MATCH SET
             r.weight = r.weight + 0.1,
@@ -132,6 +142,11 @@ class Neo4jStore:
                 THEN r.document_ids + $document_id
                 ELSE r.document_ids
             END,
+            r.source_chunk_ids = CASE WHEN $chunk_id <> '' AND NOT $chunk_id IN coalesce(r.source_chunk_ids, []) THEN coalesce(r.source_chunk_ids, []) + $chunk_id ELSE coalesce(r.source_chunk_ids, []) END,
+            r.confidence = CASE WHEN $confidence > coalesce(r.confidence, 0.0) THEN $confidence ELSE r.confidence END,
+            r.evidence = CASE WHEN size($evidence) > size(coalesce(r.evidence, '')) THEN $evidence ELSE r.evidence END,
+            r.valid_from = coalesce($valid_from, r.valid_from),
+            r.valid_to = coalesce($valid_to, r.valid_to),
             r.description = CASE WHEN size($description) > size(coalesce(r.description, '')) THEN $description ELSE r.description END
         """
         with self._driver.session(database=settings.NEO4J_DATABASE) as session:
@@ -142,6 +157,11 @@ class Neo4jStore:
                 "document_id": document_id,
                 "description": description,
                 "weight": weight,
+                "chunk_id": chunk_id,
+                "evidence": evidence,
+                "confidence": max(0.0, min(1.0, confidence)),
+                "valid_from": valid_from,
+                "valid_to": valid_to,
             })
 
     # ─── Query Operations ────────────────────────────────────────────────────
@@ -257,12 +277,20 @@ class Neo4jStore:
                 relation: r.relation_type,
                 description: coalesce(r.description, ''),
                 direction: 'outgoing'
+                ,document_ids: coalesce(r.document_ids, [])
+                ,chunk_ids: coalesce(r.source_chunk_ids, [])
+                ,confidence: coalesce(r.confidence, 0.5)
+                ,valid_from: r.valid_from, valid_to: r.valid_to
             }) AS out_rels,
             COLLECT(DISTINCT {
                 source_label: s.label,
                 relation: r2.relation_type,
                 description: coalesce(r2.description, ''),
                 direction: 'incoming'
+                ,document_ids: coalesce(r2.document_ids, [])
+                ,chunk_ids: coalesce(r2.source_chunk_ids, [])
+                ,confidence: coalesce(r2.confidence, 0.5)
+                ,valid_from: r2.valid_from, valid_to: r2.valid_to
             }) AS in_rels
         """
         context = []
@@ -280,6 +308,11 @@ class Neo4jStore:
                         context.append({
                             "text": f"{label} {rel_text} {rel['target_label']}{desc}",
                             "source": "graph",
+                            "document_ids": rel.get("document_ids", []),
+                            "chunk_ids": rel.get("chunk_ids", []),
+                            "confidence": rel.get("confidence", 0.5),
+                            "valid_from": rel.get("valid_from"),
+                            "valid_to": rel.get("valid_to"),
                         })
 
                 for rel in record["in_rels"]:
@@ -289,6 +322,11 @@ class Neo4jStore:
                         context.append({
                             "text": f"{rel['source_label']} {rel_text} {label}{desc}",
                             "source": "graph",
+                            "document_ids": rel.get("document_ids", []),
+                            "chunk_ids": rel.get("chunk_ids", []),
+                            "confidence": rel.get("confidence", 0.5),
+                            "valid_from": rel.get("valid_from"),
+                            "valid_to": rel.get("valid_to"),
                         })
 
         return context[:30]
@@ -514,7 +552,9 @@ class Neo4jStore:
     def health_check(self) -> str:
         """Check Neo4j connectivity."""
         if not self._driver:
-            return "disconnected"
+            self._connect()
+            if not self._driver:
+                return "disconnected"
         try:
             self._driver.verify_connectivity()
             return "ok"

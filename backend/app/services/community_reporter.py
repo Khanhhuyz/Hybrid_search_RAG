@@ -139,6 +139,7 @@ class CommunityReporter:
             "model": settings.LLM_MODEL,
             "prompt": prompt,
             "stream": False,
+            "format": "json",
             "options": {"temperature": 0.0, "num_predict": settings.COMMUNITY_MAX_REPORT_TOKENS},
         }
         async with httpx.AsyncClient(timeout=60.0) as client:

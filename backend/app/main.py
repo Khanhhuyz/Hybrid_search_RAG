@@ -11,8 +11,9 @@ from fastapi.responses import JSONResponse
 
 from app.config import settings
 from app.database import init_db
-from app.dependencies import init_services, get_vector_store, get_graph_builder
-from app.api import documents, search, graph, evaluation
+from app.dependencies import init_services, get_vector_store, get_graph_builder, get_embedder
+from app.services import ingestion
+from app.api import documents, search, graph, evaluation, agent
 
 # ─── Logging ─────────────────────────────────────────────────────────────────
 
@@ -75,8 +76,14 @@ async def lifespan(app: FastAPI):
         logger.warning(f"⚠️ Neo4j check failed: {e}")
 
     logger.info(f"🌐 GRAG API v2 running on http://{settings.HOST}:{settings.PORT}{settings.API_PREFIX}")
+    try:
+        await ingestion.recover(get_embedder(), get_vector_store(), get_graph_builder())
+    except Exception as e:
+        logger.error("Failed to recover ingestion jobs: %s", e)
+
     yield
 
+    await ingestion.shutdown()
     # Shutdown: close Neo4j driver
     try:
         gb = get_graph_builder()
@@ -124,6 +131,7 @@ app.include_router(documents.router, prefix=settings.API_PREFIX)
 app.include_router(search.router,    prefix=settings.API_PREFIX)
 app.include_router(graph.router,     prefix=settings.API_PREFIX)
 app.include_router(evaluation.router, prefix=settings.API_PREFIX)
+app.include_router(agent.router, prefix=settings.API_PREFIX)
 
 
 # ─── Health Check ────────────────────────────────────────────────────────────

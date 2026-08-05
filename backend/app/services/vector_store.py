@@ -88,7 +88,12 @@ class VectorStoreService:
                         "content":           chunk["content"],
                         "chunk_index":       chunk["chunk_index"],
                         "page_number":       chunk.get("page_number"),
+                        "page_end":          chunk.get("page_end"),
                         "section":           chunk.get("section", ""),
+                        "parent_id":         chunk.get("parent_id"),
+                        "parent_content":    chunk.get("parent_content"),
+                        "chunk_type":        chunk.get("chunk_type", "text"),
+                        "metadata":          chunk.get("metadata", {}),
                     },
                 )
             )
@@ -159,7 +164,12 @@ class VectorStoreService:
                 "content":           r.payload.get("content"),
                 "chunk_index":       r.payload.get("chunk_index"),
                 "page_number":       r.payload.get("page_number"),
+                "page_end":          r.payload.get("page_end"),
                 "section":           r.payload.get("section"),
+                "parent_id":         r.payload.get("parent_id"),
+                "parent_content":    r.payload.get("parent_content"),
+                "chunk_type":        r.payload.get("chunk_type", "text"),
+                "metadata":          r.payload.get("metadata", {}),
             }
             for r in results
         ]

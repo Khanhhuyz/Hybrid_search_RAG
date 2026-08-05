@@ -21,6 +21,10 @@ export interface Document {
   chunk_count: number;
   entity_count: number;
   error_message?: string;
+  progress_stage: string;
+  progress_current: number;
+  progress_total: number;
+  heartbeat_at?: string;
   created_at: string;
   updated_at: string;
 }
@@ -146,6 +150,29 @@ export interface HealthStatus {
   };
 }
 
+export interface AgentArtifact {
+  id: string;
+  artifact_type: string;
+  title: string;
+  filename: string;
+  mime_type: string;
+  size: number;
+  preview: string;
+  download_url: string;
+}
+
+export interface AgentRunResponse {
+  run_id: string;
+  intent: string;
+  answer: string;
+  plan: string[];
+  steps: Array<Record<string, unknown>>;
+  evidence_status: string;
+  citations: Citation[];
+  artifacts: AgentArtifact[];
+  pending_actions: Array<Record<string, unknown>>;
+}
+
 // ─── HTTP Helper ──────────────────────────────────────────────────────────────
 
 async function request<T>(
@@ -195,11 +222,30 @@ export const documentsApi = {
   delete: (id: string): Promise<void> =>
     request(`/documents/${id}`, { method: "DELETE" }),
 
-  status: (id: string): Promise<Pick<Document, "id" | "status" | "chunk_count" | "entity_count" | "error_message">> =>
+  status: (id: string): Promise<Pick<Document, "id" | "status" | "chunk_count" | "entity_count" | "error_message" | "progress_stage" | "progress_current" | "progress_total" | "heartbeat_at">> =>
     request(`/documents/${id}/status`),
+
+  retry: (id: string): Promise<Document> =>
+    request(`/documents/${id}/retry`, { method: "POST" }),
 
   getChunks: (id: string): Promise<{ document_id: string; filename: string; total_chunks: number; chunks: ChunkResult[] }> =>
     request(`/documents/${id}/chunks`),
+};
+
+export const agentApi = {
+  run: (requestText: string, outputFormat?: string, documentIds?: string[]): Promise<AgentRunResponse> =>
+    request("/agent/run", {
+      method: "POST",
+      body: JSON.stringify({
+        request: requestText,
+        output_format: outputFormat || null,
+        document_ids: documentIds,
+      }),
+    }),
+  history: (): Promise<{ runs: Array<Record<string, unknown>> }> =>
+    request("/agent/runs"),
+  downloadUrl: (artifactId: string): string =>
+    `${API_BASE}/agent/artifacts/${artifactId}/download`,
 };
 
 // ─── Search API ───────────────────────────────────────────────────────────────

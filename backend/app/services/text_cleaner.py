@@ -71,7 +71,7 @@ class TextCleaner:
         # Collect first 3 and last 3 lines of each page
         candidate_lines: Counter = Counter()
         for page_text in pages:
-            lines = [l.strip() for l in page_text.strip().split("\n") if l.strip()]
+            lines = [line.strip() for line in page_text.strip().split("\n") if line.strip()]
             header_candidates = lines[:3]
             footer_candidates = lines[-3:] if len(lines) > 3 else []
             for line in header_candidates + footer_candidates:

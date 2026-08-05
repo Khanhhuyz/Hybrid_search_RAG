@@ -7,6 +7,7 @@ from app.services.vector_store import VectorStoreService
 from app.services.graph_builder import GraphBuilderService
 from app.services.rag_pipeline import RAGPipeline
 from app.services.monitor import Monitor
+from app.services.agent import AgentOrchestrator
 
 # Singleton instances
 _embedder: EmbedderService       = None
@@ -14,16 +15,18 @@ _vector_store: VectorStoreService = None
 _graph_builder: GraphBuilderService = None
 _rag_pipeline: RAGPipeline        = None
 _monitor: Monitor                  = None
+_agent: AgentOrchestrator          = None
 
 
 def init_services():
     """Initialize all services. Called on application startup."""
-    global _embedder, _vector_store, _graph_builder, _rag_pipeline, _monitor
+    global _embedder, _vector_store, _graph_builder, _rag_pipeline, _monitor, _agent
     _monitor       = Monitor()
     _embedder      = EmbedderService()
     _vector_store  = VectorStoreService()
     _graph_builder = GraphBuilderService()
     _rag_pipeline  = RAGPipeline(_embedder, _vector_store, _graph_builder, _monitor)
+    _agent         = AgentOrchestrator(_rag_pipeline)
 
 
 def get_embedder() -> EmbedderService:
@@ -44,3 +47,7 @@ def get_rag_pipeline() -> RAGPipeline:
 
 def get_monitor() -> Monitor:
     return _monitor
+
+
+def get_agent() -> AgentOrchestrator:
+    return _agent

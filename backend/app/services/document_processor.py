@@ -6,7 +6,9 @@ Integrates TextCleaner for preprocessing before chunking.
 import re
 import logging
 from pathlib import Path
-from typing import Optional, List
+from typing import Any, Dict, List
+
+from app.config import settings
 
 from app.services.text_cleaner import TextCleaner
 
@@ -41,6 +43,83 @@ class DocumentProcessor:
             cleaned = self.cleaner.clean(raw_text)
 
         return cleaned
+
+    def extract_pages(self, file_path: Path, file_type: str) -> List[Dict[str, Any]]:
+        """Return layout-bearing page blocks; gracefully falls back to one text page."""
+        kind = file_type.lower()
+        if kind == ".pdf":
+            return self._extract_pdf_pages(file_path)
+        if kind == ".docx":
+            return self._extract_docx_blocks(file_path)
+        text = self.extract_text(file_path, file_type)
+        return [{"page_number": 1, "text": text, "blocks": [], "source": "native"}]
+
+    @staticmethod
+    def _table_markdown(table: List[List[Any]]) -> str:
+        rows = [[str(cell or "").replace("\n", " ").strip() for cell in row] for row in table]
+        rows = [row for row in rows if any(row)]
+        if not rows:
+            return ""
+        width = max(map(len, rows))
+        rows = [row + [""] * (width - len(row)) for row in rows]
+        header = rows[0]
+        return "\n".join([
+            "| " + " | ".join(header) + " |",
+            "| " + " | ".join(["---"] * width) + " |",
+            *("| " + " | ".join(row) + " |" for row in rows[1:]),
+        ])
+
+    def _extract_pdf_pages(self, file_path: Path) -> List[Dict[str, Any]]:
+        try:
+            import pdfplumber
+        except ImportError as exc:
+            raise RuntimeError("pdfplumber is required for PDF processing") from exc
+        pages = []
+        with pdfplumber.open(file_path) as pdf:
+            for number, page in enumerate(pdf.pages, 1):
+                text = page.extract_text(layout=True) or ""
+                tables = [self._table_markdown(table) for table in page.extract_tables()]
+                tables = [table for table in tables if table]
+                source = "native"
+                if settings.OCR_ENABLED and len(text.strip()) < settings.OCR_MIN_PAGE_CHARS:
+                    try:
+                        import pytesseract
+                        text = pytesseract.image_to_string(page.to_image(resolution=200).original, lang="vie+eng")
+                        source = "ocr"
+                    except Exception as exc:
+                        logger.info("OCR unavailable for page %s: %s", number, exc)
+                combined = text.strip()
+                if tables:
+                    combined += "\n\n" + "\n\n".join(f"[TABLE]\n{table}" for table in tables)
+                pages.append({
+                    "page_number": number,
+                    "text": self.cleaner.clean(combined),
+                    "blocks": [{"type": "table", "content": table} for table in tables],
+                    "source": source,
+                })
+        return pages
+
+    def _extract_docx_blocks(self, file_path: Path) -> List[Dict[str, Any]]:
+        try:
+            from docx import Document
+        except ImportError as exc:
+            raise RuntimeError("python-docx is required for DOCX processing") from exc
+        doc = Document(file_path)
+        blocks, body = [], []
+        for paragraph in doc.paragraphs:
+            value = paragraph.text.strip()
+            if not value:
+                continue
+            style = (paragraph.style.name or "").lower()
+            if style.startswith("heading"):
+                value = f"# {value}"
+            body.append(value)
+        for table in doc.tables:
+            value = self._table_markdown([[cell.text for cell in row.cells] for row in table.rows])
+            if value:
+                body.append(f"[TABLE]\n{value}")
+                blocks.append({"type": "table", "content": value})
+        return [{"page_number": 1, "text": self.cleaner.clean("\n\n".join(body)), "blocks": blocks, "source": "native"}]
 
     # ─── Format-Specific Extractors ──────────────────────────────────────────
 
@@ -101,7 +180,7 @@ class DocumentProcessor:
         text = re.sub(r"`[^`]+`", "", text)                  # remove inline code
         text = re.sub(r"!\[.*?\]\(.*?\)", "", text)          # remove images
         text = re.sub(r"\[([^\]]+)\]\([^\)]+\)", r"\1", text) # links → text
-        text = re.sub(r"#{1,6}\s+", "", text)                # headings
+        # Keep headings: structural chunking relies on them.
         text = re.sub(r"(\*{1,2}|_{1,2})(.*?)\1", r"\2", text) # bold/italic
         return text.strip()
 

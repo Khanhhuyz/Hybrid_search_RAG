@@ -15,6 +15,7 @@ import asyncio
 from typing import List, Dict, Any, Optional, AsyncGenerator
 
 import httpx
+from sqlalchemy import select
 
 from app.config import settings
 from app.services.embedder import EmbedderService
@@ -26,6 +27,8 @@ from app.services.global_search import GlobalSearch
 from app.services.context_builder import ContextBuilder
 from app.services.answer_processor import AnswerProcessor
 from app.services.monitor import Monitor
+from app.services.hybrid_retriever import BM25Retriever, MultilingualReranker, reciprocal_rank_fusion
+from app.database import AsyncSessionLocal, ChunkModel, DocumentModel
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +37,7 @@ Your answers should be:
 - Accurate and grounded in the context
 - Clear and concise
 - Reference the source documents using [S1], [S2] etc. when relevant
+- Put one or more citations directly after EVERY factual claim
 - Honest about uncertainty if the context does not contain the answer
 - Answer in the SAME language as the user's question (e.g. if the question is in Vietnamese, you MUST reply in Vietnamese, even if the context documents are in English).
 
@@ -81,6 +85,8 @@ class RAGPipeline:
         self.global_search = GlobalSearch(neo4j_store=graph_builder.neo4j)
         self.context_builder = ContextBuilder()
         self.answer_processor = AnswerProcessor()
+        self.sparse_retriever = BM25Retriever()
+        self.reranker = MultilingualReranker()
 
         # Cache
         self._response_cache: Dict[str, Dict[str, Any]] = {}
@@ -138,6 +144,7 @@ class RAGPipeline:
             search_type: Force search type ("local", "global", "hybrid") or None for auto.
         """
         timings: Dict[str, float] = {}
+        candidate_k = max(top_k * settings.RETRIEVAL_CANDIDATE_MULTIPLIER, top_k)
 
         # 1. Query processing & classification
         with self.monitor.timer("query_processing", timings):
@@ -147,6 +154,7 @@ class RAGPipeline:
                 known_entities=[],  # Could populate from graph
             )
             query_type = search_type or query_info["query_type"]
+            retrieval_query = query_info.get("rewritten_query") or question
 
         # 2. Embed query
         with self.monitor.timer("embedding", timings):
@@ -170,7 +178,7 @@ class RAGPipeline:
             with self.monitor.timer("semantic_search", timings):
                 semantic_results = await self.vector_store.similarity_search(
                     query_vector=query_vector,
-                    top_k=top_k,
+                    top_k=candidate_k,
                     document_ids=document_ids,
                 )
 
@@ -186,7 +194,7 @@ class RAGPipeline:
                     question=question,
                     query_vector=query_vector,
                     entity_ids=entity_ids,
-                    top_k=top_k,
+                    top_k=candidate_k,
                     document_ids=document_ids,
                 )
                 semantic_results = local_result.get("semantic_results", [])
@@ -203,7 +211,7 @@ class RAGPipeline:
             with self.monitor.timer("semantic_search", timings):
                 semantic_results = await self.vector_store.similarity_search(
                     query_vector=query_vector,
-                    top_k=top_k * 2,
+                    top_k=candidate_k,
                     document_ids=document_ids,
                 )
 
@@ -224,14 +232,38 @@ class RAGPipeline:
                         for r in reports[:3]
                     ]
 
-        # 4. RRF Re-ranking
+        # 4. Independent sparse retrieval + true multi-list RRF + reranking.
+        with self.monitor.timer("sparse_search", timings):
+            corpus = await self._load_chunks(document_ids, query_info.get("metadata_filters"))
+            sparse_lists = {
+                f"sparse_{index}": self.sparse_retriever.search(subquery, corpus, candidate_k)
+                for index, subquery in enumerate(query_info.get("subqueries") or [retrieval_query])
+            }
+            sparse_results = reciprocal_rank_fusion(sparse_lists)[:candidate_k]
+            graph_results = self._graph_ranked_chunks(graph_context_items, corpus, candidate_k)
         with self.monitor.timer("reranking", timings):
-            fused_results = self._apply_rrf(semantic_results, top_k=top_k)
+            fused_candidates = reciprocal_rank_fusion(
+                {"dense": semantic_results, "sparse": sparse_results, "graph": graph_results},
+                weights={"dense": settings.DENSE_WEIGHT, "sparse": settings.SPARSE_WEIGHT, "graph": settings.GRAPH_WEIGHT},
+            )[:candidate_k]
+            fused_results = await self.reranker.rerank(retrieval_query, fused_candidates, top_k)
+
+        # Parent-child retrieval: rank precise children, give the generator their
+        # coherent parent section while retaining child spans for citations.
+        context_results = []
+        seen_parents = set()
+        for item in fused_results:
+            parent_id = item.get("parent_id")
+            context_item = dict(item)
+            if parent_id and item.get("parent_content") and parent_id not in seen_parents:
+                context_item["content"] = item["parent_content"]
+                seen_parents.add(parent_id)
+            context_results.append(context_item)
 
         # 5. Build context with token budget
         with self.monitor.timer("context_building", timings):
             context = self.context_builder.build(
-                semantic_results=fused_results,
+                semantic_results=context_results,
                 graph_context=graph_context_items,
                 community_context=self._format_community_for_builder(community_context),
                 question=question,
@@ -276,7 +308,46 @@ class RAGPipeline:
             "retrieval_mode": mode,
             "query_type": query_type,
             "timings_ms": timings,
+            "evidence_score": max((r.get("evidence_score", 0.0) for r in fused_results), default=0.0),
+            "retrieved_results": fused_results,
         }
+
+    async def _load_chunks(self, document_ids: Optional[List[str]], metadata_filters: Optional[Dict] = None) -> List[Dict]:
+        async with AsyncSessionLocal() as db:
+            statement = select(ChunkModel, DocumentModel.original_name).join(
+                DocumentModel, ChunkModel.document_id == DocumentModel.id
+            )
+            if document_ids:
+                statement = statement.where(ChunkModel.document_id.in_(document_ids))
+            filters = metadata_filters or {}
+            if filters.get("filename_contains"):
+                statement = statement.where(DocumentModel.original_name.ilike(f"%{filters['filename_contains']}%"))
+            if filters.get("section_contains"):
+                statement = statement.where(ChunkModel.section.ilike(f"%{filters['section_contains']}%"))
+            if filters.get("chunk_type") in {"text", "table"}:
+                statement = statement.where(ChunkModel.chunk_type == filters["chunk_type"])
+            rows = (await db.execute(statement)).all()
+        return [{
+            "id": chunk.id, "document_id": chunk.document_id,
+            "document_filename": filename, "content": chunk.content,
+            "chunk_index": chunk.chunk_index, "page_number": chunk.page_number,
+            "page_end": chunk.page_end, "section": chunk.section,
+            "parent_id": chunk.parent_id, "parent_content": chunk.parent_content,
+            "chunk_type": chunk.chunk_type,
+        } for chunk, filename in rows]
+
+    @staticmethod
+    def _graph_ranked_chunks(graph_items: List[Dict], corpus: List[Dict], top_k: int) -> List[Dict]:
+        identifiers = set()
+        for item in graph_items:
+            identifiers.update(str(value) for value in item.get("chunk_ids", []) if value)
+            identifiers.update(str(value) for value in item.get("document_ids", []) if value)
+        if not identifiers:
+            return []
+        ranked = [row for row in corpus if str(row.get("id")) in identifiers or str(row.get("document_id")) in identifiers]
+        for row in ranked:
+            row["retriever"] = "graph"
+        return ranked[:top_k]
 
     def _format_community_for_builder(self, community_results: List[Dict]) -> List[Dict]:
         """Convert community intermediate results to builder format."""
@@ -290,22 +361,8 @@ class RAGPipeline:
         return formatted
 
     def _apply_rrf(self, semantic_results: List[Dict], top_k: int = 5, k_constant: int = 60) -> List[Dict]:
-        """Apply Reciprocal Rank Fusion (RRF) algorithm to re-rank search results."""
-        if not semantic_results:
-            return []
-
-        scored_results = []
-        for rank, r in enumerate(semantic_results):
-            rrf_score = 1.0 / (k_constant + (rank + 1))
-            orig_score = r.get("score", 0.0)
-            combined_score = rrf_score + (0.5 * orig_score)
-
-            r_copy = dict(r)
-            r_copy["rrf_score"] = combined_score
-            scored_results.append(r_copy)
-
-        scored_results.sort(key=lambda x: x["rrf_score"], reverse=True)
-        return scored_results[:top_k]
+        """Backward-compatible one-list wrapper around standards-compliant RRF."""
+        return reciprocal_rank_fusion({"dense": semantic_results}, k=k_constant)[:top_k]
 
     # ─── Answer Generation ───────────────────────────────────────────────────
 
@@ -335,7 +392,10 @@ class RAGPipeline:
             timings.update(retrieval.get("timings_ms", {}))
 
             with self.monitor.timer("llm_generation", timings):
-                answer_text = await self._call_llm(retrieval["prompt"])
+                if retrieval["evidence_score"] < settings.RETRIEVAL_MIN_EVIDENCE_SCORE:
+                    answer_text = self._no_answer(question)
+                else:
+                    answer_text = await self._call_llm(retrieval["prompt"])
 
             # Post-processing
             with self.monitor.timer("post_processing", timings):
@@ -346,6 +406,7 @@ class RAGPipeline:
                     graph_nodes_used=retrieval["graph_nodes_used"],
                     retrieval_mode=retrieval["retrieval_mode"],
                     question=question,
+                    evidence_score=retrieval["evidence_score"],
                 )
 
             result = {
@@ -361,6 +422,8 @@ class RAGPipeline:
                 "confidence_score": processed["confidence_score"],
                 "timings_ms": timings,
                 "warnings": processed.get("warnings", []),
+                "groundedness_score": processed.get("groundedness_score", 0.0),
+                "claim_support": processed.get("claim_support", []),
             }
 
             # Cache result
@@ -415,6 +478,13 @@ class RAGPipeline:
             question, top_k, use_graph, document_ids, search_type, history
         )
         timings.update(retrieval.get("timings_ms", {}))
+
+        if retrieval["evidence_score"] < settings.RETRIEVAL_MIN_EVIDENCE_SCORE:
+            no_answer = self._no_answer(question)
+            yield f"data: {json.dumps({'type': 'metadata', 'data': {'question': question, 'citations': retrieval['citations'], 'graph_context': retrieval['graph_context'], 'semantic_chunks_used': retrieval['semantic_chunks_used'], 'graph_nodes_used': retrieval['graph_nodes_used'], 'model_used': settings.LLM_MODEL, 'retrieval_mode': retrieval['retrieval_mode'], 'query_type': retrieval.get('query_type', 'hybrid'), 'timings_ms': timings}})}\n\n"
+            yield f"data: {json.dumps({'type': 'token', 'data': {'text': no_answer}})}\n\n"
+            yield f"data: {json.dumps({'type': 'done', 'data': {'confidence_score': 0.0, 'groundedness_score': 0.0, 'warnings': ['Retrieved evidence is insufficient for a reliable answer'], 'timings_ms': timings}})}\n\n"
+            return
 
         # 1. Send metadata payload first
         meta_payload = {
@@ -477,6 +547,7 @@ class RAGPipeline:
                 graph_nodes_used=retrieval["graph_nodes_used"],
                 retrieval_mode=retrieval["retrieval_mode"],
                 question=question,
+                evidence_score=retrieval["evidence_score"],
             )
 
             # 3. Send done event with post-processing results
@@ -485,6 +556,7 @@ class RAGPipeline:
                 "data": {
                     "confidence_score": processed["confidence_score"],
                     "warnings": processed.get("warnings", []),
+                    "groundedness_score": processed.get("groundedness_score", 0.0),
                     "timings_ms": timings,
                 }
             }
@@ -556,8 +628,17 @@ class RAGPipeline:
                 "page_number":       r.get("page_number"),
                 "relevance_score":   round(r.get("score", 0), 4),
                 "excerpt":           r.get("content", "")[:200] + "...",
+                "support_text":      r.get("content", ""),
+                "evidence_score":    round(r.get("evidence_score", 0.0), 4),
             })
         return citations
+
+    @staticmethod
+    def _no_answer(question: str) -> str:
+        vietnamese = any(char in question.lower() for char in "ăâđêôơưáàảãạéèẻẽẹíìỉĩịóòỏõọúùủũụýỳỷỹỵ")
+        return ("Tôi chưa tìm thấy đủ bằng chứng trong tài liệu để trả lời câu hỏi này."
+                if vietnamese else
+                "I could not find enough evidence in the documents to answer this question.")
 
     async def _call_llm(self, prompt: str) -> str:
         """Generate answer via Ollama /api/generate."""

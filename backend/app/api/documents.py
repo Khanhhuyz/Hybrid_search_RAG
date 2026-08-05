@@ -7,7 +7,7 @@ import logging
 import asyncio
 from pathlib import Path
 
-from fastapi import APIRouter, UploadFile, File, HTTPException, BackgroundTasks, Depends, Query
+from fastapi import APIRouter, UploadFile, File, HTTPException, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, delete
 
@@ -21,6 +21,7 @@ from app.services.vector_store import VectorStoreService
 from app.services.graph_builder import GraphBuilderService
 from app.services.rag_pipeline import RAGPipeline
 from app.dependencies import get_embedder, get_vector_store, get_graph_builder, get_rag_pipeline
+from app.services import ingestion
 
 router = APIRouter(prefix="/documents", tags=["Documents"])
 logger = logging.getLogger(__name__)
@@ -33,7 +34,6 @@ chunker     = TextChunker()
 
 @router.post("/upload", response_model=DocumentResponse, status_code=201)
 async def upload_document(
-    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     db: AsyncSession = Depends(get_db),
     embedder: EmbedderService = Depends(get_embedder),
@@ -96,16 +96,7 @@ async def upload_document(
     await db.refresh(doc)
 
     # ── Queue background processing ───────────────────────────────────────────
-    background_tasks.add_task(
-        _process_document,
-        doc_id=doc_id,
-        file_path=file_path,
-        file_type=suffix,
-        original_name=file.filename,
-        embedder=embedder,
-        vector_store=vector_store,
-        graph_builder=graph_builder,
-    )
+    ingestion.schedule(doc_id, file_path, suffix, file.filename, embedder, vector_store, graph_builder)
 
     return doc
 
@@ -149,7 +140,40 @@ async def get_document_status(doc_id: str, db: AsyncSession = Depends(get_db)):
         "chunk_count": doc.chunk_count,
         "entity_count": doc.entity_count,
         "error_message": doc.error_message,
+        "progress_stage": doc.progress_stage,
+        "progress_current": doc.progress_current,
+        "progress_total": doc.progress_total,
+        "heartbeat_at": doc.heartbeat_at,
     }
+
+
+@router.post("/{doc_id}/retry", response_model=DocumentResponse, status_code=202)
+async def retry_document(
+    doc_id: str,
+    db: AsyncSession = Depends(get_db),
+    embedder: EmbedderService = Depends(get_embedder),
+    vector_store: VectorStoreService = Depends(get_vector_store),
+    graph_builder: GraphBuilderService = Depends(get_graph_builder),
+):
+    doc = await _get_doc_or_404(db, doc_id)
+    if doc.status == ProcessingStatus.COMPLETED:
+        if not doc.error_message:
+            raise HTTPException(status_code=409, detail="Completed documents do not need retry")
+        # Vector indexing is already checkpointed. Reuse chunks/embeddings and retry graph only.
+        doc.status = ProcessingStatus.PENDING
+        doc.progress_stage = "queued"
+        doc.progress_current = 0
+        doc.progress_total = 0
+        doc.error_message = None
+        await db.commit()
+    else:
+        try:
+            await ingestion.reset_document(db, doc, vector_store, graph_builder)
+        except RuntimeError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+    await db.refresh(doc)
+    ingestion.schedule(doc.id, doc.file_path, doc.file_type, doc.original_name, embedder, vector_store, graph_builder)
+    return doc
 
 
 # ─── Delete ───────────────────────────────────────────────────────────────────

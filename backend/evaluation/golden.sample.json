@@ -1,0 +1,27 @@
+{
+  "thresholds": {
+    "recall": 1.0,
+    "ndcg": 1.0,
+    "citation_f1": 1.0,
+    "no_answer_accuracy": 1.0,
+    "entity_f1": 1.0,
+    "relation_f1": 1.0
+  },
+  "cases": [
+    {
+      "question": "Who manages Project Alpha?",
+      "retrieved_chunk_ids": ["chunk-project-alpha"],
+      "relevant_chunk_ids": ["chunk-project-alpha"],
+      "answer": "Alice manages Project Alpha.",
+      "reference_answer": "Project Alpha is managed by Alice.",
+      "citations": [{"source_id": "chunk-project-alpha"}],
+      "relevant_source_ids": ["chunk-project-alpha"],
+      "expected_no_answer": false,
+      "predicted_no_answer": false,
+      "extracted_entities": ["ALICE", "PROJECT ALPHA"],
+      "expected_entities": ["ALICE", "PROJECT ALPHA"],
+      "extracted_relations": ["ALICE|MANAGES|PROJECT ALPHA"],
+      "expected_relations": ["ALICE|MANAGES|PROJECT ALPHA"]
+    }
+  ]
+}

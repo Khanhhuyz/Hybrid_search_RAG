@@ -1,6 +1,7 @@
 """Deterministic retrieval and answer metrics for offline GraphRAG evaluation."""
 import re
 import unicodedata
+import math
 from statistics import mean
 from typing import Dict, Iterable, List
 
@@ -43,13 +44,26 @@ class Evaluator:
         recall = len(hits) / len(relevant) if relevant else 1.0
         f1 = 2 * precision * recall / (precision + recall) if precision + recall else 0.0
         first_rank = next((i for i, item in enumerate(retrieved, 1) if item in relevant), None)
+        dcg = sum((1.0 if item in relevant else 0.0) / math.log2(rank + 1) for rank, item in enumerate(retrieved, 1))
+        ideal_hits = min(len(relevant), len(retrieved))
+        idcg = sum(1.0 / math.log2(rank + 1) for rank in range(1, ideal_hits + 1))
         return {
             "precision": round(precision, 4),
             "recall": round(recall, 4),
             "f1": round(f1, 4),
             "hit_rate": float(bool(hits)),
             "reciprocal_rank": round(1 / first_rank, 4) if first_rank else 0.0,
+            "ndcg": round(dcg / idcg, 4) if idcg else 0.0,
         }
+
+    @staticmethod
+    def set_metrics(predicted: List[str], expected: List[str], prefix: str) -> Dict[str, float]:
+        predicted_set, expected_set = set(predicted), set(expected)
+        hits = len(predicted_set & expected_set)
+        precision = hits / len(predicted_set) if predicted_set else (1.0 if not expected_set else 0.0)
+        recall = hits / len(expected_set) if expected_set else 1.0
+        f1 = 2 * precision * recall / (precision + recall) if precision + recall else 0.0
+        return {f"{prefix}_precision": round(precision, 4), f"{prefix}_recall": round(recall, 4), f"{prefix}_f1": round(f1, 4)}
 
     @classmethod
     def evaluate_case(cls, case: Dict) -> Dict:
@@ -58,13 +72,20 @@ class Evaluator:
             cls.answer_token_f1(case.get("answer", ""), case.get("reference_answer", "")),
             4,
         )
+        citation_ids = [str(item.get("source_id", item.get("chunk_id", ""))) for item in case.get("citations", [])]
+        metrics.update(cls.set_metrics(citation_ids, case.get("relevant_source_ids", []), "citation"))
+        metrics["no_answer_accuracy"] = float(bool(case.get("predicted_no_answer")) == bool(case.get("expected_no_answer")))
+        metrics.update(cls.set_metrics(case.get("extracted_entities", []), case.get("expected_entities", []), "entity"))
+        metrics.update(cls.set_metrics(case.get("extracted_relations", []), case.get("expected_relations", []), "relation"))
         return {"question": case["question"], "metrics": metrics}
 
     @classmethod
     def evaluate_batch(cls, cases: Iterable[Dict]) -> Dict:
         results = [cls.evaluate_case(case) for case in cases]
-        metric_names = (
-            "precision", "recall", "f1", "hit_rate", "reciprocal_rank", "answer_token_f1"
+        metric_names = tuple(results[0]["metrics"].keys()) if results else (
+            "precision", "recall", "f1", "hit_rate", "reciprocal_rank", "ndcg", "answer_token_f1",
+            "citation_precision", "citation_recall", "citation_f1", "no_answer_accuracy",
+            "entity_precision", "entity_recall", "entity_f1", "relation_precision", "relation_recall", "relation_f1",
         )
         aggregate = {
             name: round(mean(result["metrics"][name] for result in results), 4)

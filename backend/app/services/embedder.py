@@ -44,12 +44,8 @@ class EmbedderService:
 
         async def _embed_with_sem(text: str, index: int) -> tuple[int, List[float]]:
             async with semaphore:
-                try:
-                    emb = await self.embed_text(text)
-                    return index, emb
-                except Exception as e:
-                    logger.error(f"Embedding failed for chunk {index}: {e}")
-                    return index, [0.0] * settings.EMBEDDING_DIMENSION
+                emb = await self.embed_text(text)
+                return index, emb
 
         tasks = [_embed_with_sem(text, i) for i, text in enumerate(texts)]
         
