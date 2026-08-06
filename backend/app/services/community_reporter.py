@@ -23,6 +23,11 @@ Community Members:
 Relationships within this community:
 {relationships_text}
 
+Rules:
+- Use only the supplied relationship evidence. Do not add background knowledge.
+- Every key finding must be directly supported by at least one evidence span.
+- If the evidence is insufficient, return an empty key_findings list and say so.
+
 Return ONLY valid JSON in exactly this format:
 {{
   "title": "A short descriptive title for this community (max 10 words)",
@@ -56,6 +61,17 @@ class CommunityReporter:
         if community_id in self._report_cache:
             return self._report_cache[community_id]
 
+        if not relationships:
+            return {
+                "community_id": community_id,
+                "level": community.get("level", 0),
+                "title": "Unverified entity cluster",
+                "summary": "No verified relationship evidence is available for this cluster.",
+                "key_findings": [],
+                "main_entities": community.get("key_entities", []),
+                "importance_score": 0.0,
+            }
+
         # Build text descriptions of members
         members = community.get("members", [])
         members_text = "\n".join(
@@ -69,7 +85,8 @@ class CommunityReporter:
             rels_text = "\n".join(
                 f"- {r.get('source_label', r.get('source', '?'))} "
                 f"→ [{r.get('relation', 'RELATED_TO')}] → "
-                f"{r.get('target_label', r.get('target', '?'))}"
+                f"{r.get('target_label', r.get('target', '?'))}; "
+                f"Evidence: {r.get('evidence', '')}"
                 for r in relationships[:20]
             )
 

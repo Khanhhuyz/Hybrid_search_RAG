@@ -158,8 +158,33 @@ host. Graph relations retain document/chunk provenance, evidence, confidence,
 and optional validity dates. Generated answers are verified claim by claim and
 fall back to a no-answer response when evidence is below the configured gate.
 
-Existing indexed documents must be retried/re-indexed once to populate exact
-page, parent-child, table, and graph-provenance metadata.
+Existing indexed documents must be re-indexed once to populate the structural
+metadata and remove old TOC chunks/noisy graph identities. Re-indexing replaces
+the stored chunks, vectors, and graph provenance for every uploaded document:
+
+```bash
+cd backend
+python scripts/reindex_all.py --yes
+```
+
+The API also exposes `POST /api/v1/documents/{document_id}/reindex` for a single
+document. New documents record an index schema version so stale indexes are
+visible in the document/status responses.
+
+Confidence is intentionally reported as uncalibrated until reviewed outcomes
+are available. Label at least 20 answers (including both correct and incorrect
+ones) with `evidence_score`, `groundedness_score`, and `is_correct`, then fit and
+save the calibration model:
+
+```bash
+cd backend
+python scripts/calibrate_confidence.py data/evaluation/reviewed.json \
+  --output data/evaluation/confidence_calibration.json
+```
+
+Restart the backend after producing the calibration file. API responses expose
+`confidence_calibrated` so callers can distinguish learned probabilities from
+the conservative fallback score.
 
 ## Agent Workspace
 

@@ -65,6 +65,31 @@ class Evaluator:
         f1 = 2 * precision * recall / (precision + recall) if precision + recall else 0.0
         return {f"{prefix}_precision": round(precision, 4), f"{prefix}_recall": round(recall, 4), f"{prefix}_f1": round(f1, 4)}
 
+    @staticmethod
+    def confidence_metrics(cases: List[Dict], bins: int = 10) -> Dict[str, float]:
+        labelled = [case for case in cases if "confidence_score" in case and "is_correct" in case]
+        if not labelled:
+            return {}
+        probabilities = [max(0.0, min(1.0, float(case["confidence_score"]))) for case in labelled]
+        labels = [float(bool(case["is_correct"])) for case in labelled]
+        brier = mean((probability - label) ** 2 for probability, label in zip(probabilities, labels))
+        ece = 0.0
+        for index in range(bins):
+            low, high = index / bins, (index + 1) / bins
+            members = [
+                i for i, value in enumerate(probabilities)
+                if low <= value < high or (index == bins - 1 and value == 1.0)
+            ]
+            if members:
+                accuracy = mean(labels[i] for i in members)
+                confidence = mean(probabilities[i] for i in members)
+                ece += len(members) / len(labels) * abs(accuracy - confidence)
+        return {
+            "confidence_brier": round(brier, 4),
+            "confidence_ece": round(ece, 4),
+            "confidence_cases": len(labelled),
+        }
+
     @classmethod
     def evaluate_case(cls, case: Dict) -> Dict:
         metrics = cls.retrieval_metrics(case["retrieved_chunk_ids"], case["relevant_chunk_ids"])
@@ -81,7 +106,8 @@ class Evaluator:
 
     @classmethod
     def evaluate_batch(cls, cases: Iterable[Dict]) -> Dict:
-        results = [cls.evaluate_case(case) for case in cases]
+        case_list = list(cases)
+        results = [cls.evaluate_case(case) for case in case_list]
         metric_names = tuple(results[0]["metrics"].keys()) if results else (
             "precision", "recall", "f1", "hit_rate", "reciprocal_rank", "ndcg", "answer_token_f1",
             "citation_precision", "citation_recall", "citation_f1", "no_answer_accuracy",
@@ -91,4 +117,5 @@ class Evaluator:
             name: round(mean(result["metrics"][name] for result in results), 4)
             for name in metric_names
         } if results else {name: 0.0 for name in metric_names}
+        aggregate.update(cls.confidence_metrics(case_list))
         return {"total_cases": len(results), "aggregate": aggregate, "cases": results}

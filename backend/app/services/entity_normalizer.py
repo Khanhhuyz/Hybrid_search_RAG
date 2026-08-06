@@ -8,6 +8,7 @@ import re
 from typing import Dict, List, Optional, Tuple
 
 from thefuzz import fuzz
+from app.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -42,13 +43,25 @@ VALID_ENTITY_TYPES = {
     "TECHNOLOGY", "EVENT", "DOCUMENT",
 }
 
+VALID_RELATION_TYPES = {
+    "WORKS_AT", "BELONGS_TO", "HAS_PREREQUISITE", "MENTIONS",
+    "RELATED_TO", "LOCATED_IN", "MANAGES", "USES", "CREATED_BY",
+    "DEPENDS_ON", "HAS_RISK", "PART_OF",
+}
+
+GENERIC_ENTITY_LABELS = VALID_ENTITY_TYPES | {
+    "MODEL", "DATA", "DATASET", "SYSTEM", "INPUT", "OUTPUT", "RESPONSE",
+    "TABLE", "CHAPTER", "BOOK", "DOCUMENT", "METHOD", "ALGORITHM",
+    "USER", "CODE", "EXAMPLE", "VALUE", "RESULT", "SAMPLE",
+}
+
 
 class EntityNormalizer:
     """Normalize entities for consistent knowledge graph construction."""
 
     def __init__(
         self,
-        fuzzy_threshold: int = 85,
+        fuzzy_threshold: int = 92,
         alias_map: Optional[Dict[str, str]] = None,
     ):
         self.fuzzy_threshold = fuzzy_threshold
@@ -62,7 +75,10 @@ class EntityNormalizer:
         self._known_labels: Dict[str, str] = {}  # normalized_label -> canonical_label
 
     def normalize_entities(
-        self, entities: List[Dict], existing_labels: Optional[List[str]] = None
+        self,
+        entities: List[Dict],
+        existing_labels: Optional[List[str]] = None,
+        source_text: Optional[str] = None,
     ) -> List[Dict]:
         """
         Normalize a list of extracted entities.
@@ -85,7 +101,7 @@ class EntityNormalizer:
             label = str(entity.get("label", "")).strip()
             etype = str(entity.get("type", "CONCEPT")).upper().strip()
 
-            if not label or len(label) < 2:
+            if not label:
                 continue
 
             # 1. Case normalization
@@ -93,6 +109,14 @@ class EntityNormalizer:
 
             # 2. Alias resolution
             label = self._resolve_alias(label)
+
+            if not self._valid_label(label):
+                continue
+            if source_text is not None:
+                original = str(entity.get("label", "")).strip()
+                normalized_source = self._normalize_text(source_text)
+                if self._normalize_text(original) not in normalized_source:
+                    continue
 
             # 3. Type validation
             etype = self._validate_type(etype)
@@ -120,7 +144,10 @@ class EntityNormalizer:
         return normalized
 
     def normalize_relationships(
-        self, relationships: List[Dict], label_map: Dict[str, str]
+        self,
+        relationships: List[Dict],
+        label_map: Dict[str, str],
+        source_text: Optional[str] = None,
     ) -> List[Dict]:
         """
         Normalize relationship source/target to match normalized entity labels.
@@ -133,25 +160,39 @@ class EntityNormalizer:
         for rel in relationships:
             source = str(rel.get("source", "")).upper().strip()
             target = str(rel.get("target", "")).upper().strip()
-            relation = str(rel.get("relation", "RELATED_TO")).upper().strip()
+            relation = str(rel.get("relation", "")).upper().strip()
 
             # Resolve via label_map
             source = label_map.get(source, self._resolve_alias(source))
             target = label_map.get(target, self._resolve_alias(target))
 
-            if not source or not target:
+            if not source or not target or source == target:
                 continue
 
             # Validate relation type
             relation = re.sub(r"[^A-Z_]", "", relation)
-            if not relation:
-                relation = "RELATED_TO"
+            if relation not in VALID_RELATION_TYPES:
+                continue
+
+            try:
+                confidence = float(rel.get("confidence", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                confidence = 0.0
+            if confidence < settings.GRAPH_MIN_RELATION_CONFIDENCE:
+                continue
+
+            evidence = str(rel.get("evidence", "")).strip()
+            if source_text is not None and settings.GRAPH_REQUIRE_VERBATIM_EVIDENCE:
+                if not evidence or self._normalize_text(evidence) not in self._normalize_text(source_text):
+                    continue
 
             normalized.append({
                 **rel,
                 "source": source,
                 "target": target,
                 "relation": relation,
+                "confidence": confidence,
+                "evidence": evidence,
             })
 
         return normalized
@@ -161,6 +202,24 @@ class EntityNormalizer:
     def _resolve_alias(self, label: str) -> str:
         """Resolve known aliases to canonical form."""
         return self._reverse_aliases.get(label, label)
+
+    @staticmethod
+    def _normalize_text(value: str) -> str:
+        return re.sub(r"\s+", " ", str(value or "")).casefold().strip()
+
+    @staticmethod
+    def _valid_label(label: str) -> bool:
+        if not (settings.GRAPH_MIN_ENTITY_LENGTH <= len(label) <= settings.GRAPH_MAX_ENTITY_LENGTH):
+            return False
+        if label in GENERIC_ENTITY_LABELS:
+            return False
+        if re.fullmatch(r"[\d\W_]+", label, flags=re.UNICODE):
+            return False
+        if re.search(r"https?://|www\.|[={}<>]|\b(?:none|null|true|false)\b", label, re.I):
+            return False
+        if len(label.split()) > 12:
+            return False
+        return True
 
     def _validate_type(self, entity_type: str) -> str:
         """Validate entity type against schema, fallback to CONCEPT."""
@@ -195,3 +254,6 @@ class EntityNormalizer:
             for entity in entities
             if "original_label" in entity
         }
+
+    def clear_cache(self):
+        self._known_labels.clear()

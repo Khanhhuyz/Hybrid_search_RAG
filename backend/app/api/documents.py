@@ -5,6 +5,7 @@ Handles file upload, listing, retrieval, and deletion.
 import uuid
 import logging
 import asyncio
+import json
 from pathlib import Path
 
 from fastapi import APIRouter, UploadFile, File, HTTPException, Depends, Query
@@ -139,6 +140,7 @@ async def get_document_status(doc_id: str, db: AsyncSession = Depends(get_db)):
         "status": doc.status,
         "chunk_count": doc.chunk_count,
         "entity_count": doc.entity_count,
+        "index_version": doc.index_version,
         "error_message": doc.error_message,
         "progress_stage": doc.progress_stage,
         "progress_current": doc.progress_current,
@@ -156,7 +158,7 @@ async def retry_document(
     graph_builder: GraphBuilderService = Depends(get_graph_builder),
 ):
     doc = await _get_doc_or_404(db, doc_id)
-    if doc.status == ProcessingStatus.COMPLETED:
+    if doc.status == ProcessingStatus.COMPLETED and doc.index_version >= settings.INDEX_SCHEMA_VERSION:
         if not doc.error_message:
             raise HTTPException(status_code=409, detail="Completed documents do not need retry")
         # Vector indexing is already checkpointed. Reuse chunks/embeddings and retry graph only.
@@ -173,6 +175,30 @@ async def retry_document(
             raise HTTPException(status_code=409, detail=str(exc)) from exc
     await db.refresh(doc)
     ingestion.schedule(doc.id, doc.file_path, doc.file_type, doc.original_name, embedder, vector_store, graph_builder)
+    return doc
+
+
+@router.post("/{doc_id}/reindex", response_model=DocumentResponse, status_code=202)
+async def reindex_document(
+    doc_id: str,
+    db: AsyncSession = Depends(get_db),
+    embedder: EmbedderService = Depends(get_embedder),
+    vector_store: VectorStoreService = Depends(get_vector_store),
+    graph_builder: GraphBuilderService = Depends(get_graph_builder),
+    rag: RAGPipeline = Depends(get_rag_pipeline),
+):
+    """Explicitly rebuild chunks, vectors, and graph provenance with the current schema."""
+    doc = await _get_doc_or_404(db, doc_id)
+    try:
+        await ingestion.reset_document(db, doc, vector_store, graph_builder)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    rag.clear_cache()
+    ingestion.schedule(
+        doc.id, doc.file_path, doc.file_type, doc.original_name,
+        embedder, vector_store, graph_builder,
+    )
+    await db.refresh(doc)
     return doc
 
 
@@ -198,7 +224,8 @@ async def delete_document(
         logger.warning(f"Failed to delete vectors for {doc_id}: {e}")
 
     # Delete graph entities
-    graph_builder.delete_document_entities(doc_id)
+    chunk_rows = await db.execute(select(ChunkModel.id).where(ChunkModel.document_id == doc_id))
+    graph_builder.delete_document_entities(doc_id, chunk_ids=list(chunk_rows.scalars().all()))
 
     # Delete file
     file_path = Path(doc.file_path)
@@ -236,6 +263,10 @@ async def get_document_chunks(doc_id: str, db: AsyncSession = Depends(get_db)):
                 "content": c.content,
                 "page_number": c.page_number,
                 "section": c.section,
+                "page_end": c.page_end,
+                "parent_id": c.parent_id,
+                "chunk_type": c.chunk_type,
+                "metadata": json.loads(c.metadata_json) if c.metadata_json else {},
             }
             for c in chunks
         ],

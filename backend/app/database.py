@@ -44,6 +44,7 @@ class DocumentModel(Base):
     status        = Column(SAEnum(ProcessingStatus), default=ProcessingStatus.PENDING, nullable=False)
     chunk_count   = Column(Integer, default=0)
     entity_count  = Column(Integer, default=0)
+    index_version = Column(Integer, default=0, nullable=False)
     error_message = Column(Text, nullable=True)
     progress_stage = Column(String, default="queued", nullable=False)
     progress_current = Column(Integer, default=0, nullable=False)
@@ -127,6 +128,7 @@ async def init_db():
             "progress_current": "ALTER TABLE documents ADD COLUMN progress_current INTEGER NOT NULL DEFAULT 0",
             "progress_total": "ALTER TABLE documents ADD COLUMN progress_total INTEGER NOT NULL DEFAULT 0",
             "heartbeat_at": "ALTER TABLE documents ADD COLUMN heartbeat_at DATETIME",
+            "index_version": "ALTER TABLE documents ADD COLUMN index_version INTEGER NOT NULL DEFAULT 0",
         }
         for name, statement in migrations.items():
             if name not in existing:

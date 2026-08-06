@@ -13,7 +13,7 @@ import httpx
 
 from app.config import settings
 from app.services.neo4j_store import Neo4jStore
-from app.services.entity_normalizer import EntityNormalizer
+from app.services.entity_normalizer import EntityNormalizer, VALID_RELATION_TYPES
 from app.services.community_detector import CommunityDetector
 from app.services.community_reporter import CommunityReporter
 
@@ -27,11 +27,7 @@ ENTITY_TYPES = [
     "TECHNOLOGY", "EVENT", "DOCUMENT",
 ]
 
-RELATION_TYPES = [
-    "WORKS_AT", "BELONGS_TO", "HAS_PREREQUISITE", "MENTIONS",
-    "RELATED_TO", "LOCATED_IN", "MANAGES", "USES",
-    "CREATED_BY", "DEPENDS_ON", "HAS_RISK", "PART_OF",
-]
+RELATION_TYPES = sorted(VALID_RELATION_TYPES)
 
 EXTRACTION_PROMPT = """You are an expert information extractor. Analyze the following text and extract entities and relationships.
 
@@ -111,7 +107,7 @@ class GraphBuilderService:
                 try:
                     result = await self._extract_from_text(chunk["content"])
                     if result:
-                        return result, chunk["document_id"], chunk.get("id", "")
+                        return result, chunk["document_id"], chunk.get("id", ""), chunk["content"]
                 except Exception as e:
                     logger.error(f"Graph extraction failed for chunk {chunk.get('id')}: {e}")
             return None
@@ -121,8 +117,8 @@ class GraphBuilderService:
         for completed_task in asyncio.as_completed(tasks):
             res = await completed_task
             if res:
-                extraction, doc_id, chunk_id = res
-                added = self._merge_into_graph(extraction, doc_id, chunk_id)
+                extraction, doc_id, chunk_id, source_text = res
+                added = self._merge_into_graph(extraction, doc_id, chunk_id, source_text)
                 total_added += added
             processed += 1
             if progress_callback and (processed % 5 == 0 or processed == len(chunks)):
@@ -179,15 +175,26 @@ class GraphBuilderService:
 
     # ─── Graph Operations ─────────────────────────────────────────────────────
 
-    def _merge_into_graph(self, extraction: Dict, document_id: str, chunk_id: str = "") -> int:
+    def _merge_into_graph(
+        self,
+        extraction: Dict,
+        document_id: str,
+        chunk_id: str = "",
+        source_text: Optional[str] = None,
+    ) -> int:
         """Normalize and merge extracted entities/relationships into Neo4j."""
         entities_added = 0
         raw_entities = extraction.get("entities", [])
         raw_relationships = extraction.get("relationships", [])
 
         # Normalize entities
-        existing_labels = []  # Could query Neo4j for existing labels
-        normalized_entities = self.normalizer.normalize_entities(raw_entities, existing_labels)
+        try:
+            existing_labels = self.neo4j.get_entity_labels()
+        except Exception:
+            existing_labels = []
+        normalized_entities = self.normalizer.normalize_entities(
+            raw_entities, existing_labels, source_text=source_text
+        )
         label_map = self.normalizer.get_label_map(normalized_entities)
         # Ollama may reference relationships by entity `id` even when the prompt
         # asks for names. Resolve both shapes to the normalized entity label.
@@ -203,14 +210,18 @@ class GraphBuilderService:
                 label_map[entity_id] = normalized_label
 
         # Normalize relationships
-        normalized_rels = self.normalizer.normalize_relationships(raw_relationships, label_map)
+        normalized_rels = self.normalizer.normalize_relationships(
+            raw_relationships, label_map, source_text=source_text
+        )
 
         # Upsert entities into Neo4j
         node_id_map = {}
         for ent in normalized_entities:
             label = ent["label"]
             etype = ent["type"]
-            node_id = f"{etype}::{label}"
+            # Identity is label-based rather than type-based. LLM type drift must
+            # not create PERSON::PYTHON, PRODUCT::PYTHON, etc. as separate nodes.
+            node_id = f"ENTITY::{label}"
             node_id_map[label] = node_id
 
             properties = {}
@@ -233,10 +244,7 @@ class GraphBuilderService:
             tgt_id = node_id_map.get(rel["target"])
 
             if src_id and tgt_id:
-                try:
-                    confidence = float(rel.get("confidence", 0.5) or 0.5)
-                except (TypeError, ValueError):
-                    confidence = 0.5
+                confidence = float(rel["confidence"])
                 self.neo4j.upsert_relationship(
                     source_id=src_id,
                     target_id=tgt_id,
@@ -289,8 +297,20 @@ class GraphBuilderService:
             # 4. Generate community reports (use level 1 = medium resolution)
             target_level = levels[1] if len(levels) > 1 else levels[0]
             communities = target_level.get("communities", [])
+            relationships_by_community = {}
+            for community in communities:
+                member_ids = {member["node_id"] for member in community.get("members", [])}
+                relationships_by_community[community["community_id"]] = [
+                    edge for edge in edges
+                    if edge.get("source") in member_ids
+                    and edge.get("target") in member_ids
+                    and edge.get("evidence")
+                    and float(edge.get("confidence", 0.0)) >= settings.GRAPH_MIN_RELATION_CONFIDENCE
+                ]
 
-            reports = await self.community_reporter.generate_reports_batch(communities)
+            reports = await self.community_reporter.generate_reports_batch(
+                communities, relationships_by_community
+            )
 
             # 5. Store reports in Neo4j
             for report in reports:
@@ -339,6 +359,10 @@ class GraphBuilderService:
     def stats(self) -> Dict:
         return self.neo4j.stats
 
-    def delete_document_entities(self, document_id: str):
+    def delete_document_entities(
+        self, document_id: str, chunk_ids: Optional[List[str]] = None
+    ):
         """Remove all entities that belong only to this document."""
-        self.neo4j.delete_document_entities(document_id)
+        self.neo4j.delete_document_entities(document_id, chunk_ids=chunk_ids)
+        self.normalizer.clear_cache()
+        self.community_reporter.clear_cache()

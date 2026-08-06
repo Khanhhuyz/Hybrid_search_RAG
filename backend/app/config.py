@@ -18,6 +18,7 @@ class Settings(BaseSettings):
     # ─── Application ─────────────────────────────────────────────────
     APP_NAME: str = "GRAG - GraphRAG System"
     APP_VERSION: str = "2.0.0"
+    INDEX_SCHEMA_VERSION: int = 2
     DEBUG: bool = False
     LOG_LEVEL: str = "INFO"
     API_PREFIX: str = "/api/v1"
@@ -92,6 +93,9 @@ class Settings(BaseSettings):
     RETRIEVAL_MIN_EVIDENCE_SCORE: float = 0.18
     NO_ANSWER_CONFIDENCE_THRESHOLD: float = 0.35
     PARENT_CHUNK_SIZE: int = 3000
+    GLOBAL_CONTEXT_CHUNKS: int = 16
+    GLOBAL_STRUCTURE_CANDIDATES: int = 80
+    STRUCTURE_WEIGHT: float = 0.7
     OCR_ENABLED: bool = True
     OCR_MIN_PAGE_CHARS: int = 40
 
@@ -107,9 +111,18 @@ class Settings(BaseSettings):
 
     # Verification/calibration. CALIBRATION_* can be learned from a labelled
     # dataset; these defaults map evidence strength onto a conservative score.
-    GROUNDEDNESS_THRESHOLD: float = 0.35
-    CALIBRATION_SLOPE: float = 7.0
+    GROUNDEDNESS_THRESHOLD: float = 0.82
+    GROUNDING_ENFORCED: bool = True
+    CALIBRATION_FILE: Path = DATA_DIR / "evaluation" / "confidence_calibration.json"
+    CALIBRATION_SLOPE: float = 7.0  # legacy fallback for old calibration files
     CALIBRATION_MIDPOINT: float = 0.48
+
+    # Graph quality gates. Existing graph data must be re-indexed once after
+    # changing these values because rejected nodes are not retroactively removed.
+    GRAPH_MIN_ENTITY_LENGTH: int = 3
+    GRAPH_MAX_ENTITY_LENGTH: int = 100
+    GRAPH_MIN_RELATION_CONFIDENCE: float = 0.55
+    GRAPH_REQUIRE_VERBATIM_EVIDENCE: bool = True
 
     @field_validator("DEBUG", mode="before")
     @classmethod

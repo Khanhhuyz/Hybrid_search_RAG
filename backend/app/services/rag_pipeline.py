@@ -38,6 +38,8 @@ Your answers should be:
 - Clear and concise
 - Reference the source documents using [S1], [S2] etc. when relevant
 - Put one or more citations directly after EVERY factual claim
+- Copy numbers, dates, names, and negation exactly from the cited source
+- Any sentence without a valid [S#] citation will be discarded by the verifier
 - Honest about uncertainty if the context does not contain the answer
 - Answer in the SAME language as the user's question (e.g. if the question is in Vietnamese, you MUST reply in Vietnamese, even if the context documents are in English).
 
@@ -144,7 +146,6 @@ class RAGPipeline:
             search_type: Force search type ("local", "global", "hybrid") or None for auto.
         """
         timings: Dict[str, float] = {}
-        candidate_k = max(top_k * settings.RETRIEVAL_CANDIDATE_MULTIPLIER, top_k)
 
         # 1. Query processing & classification
         with self.monitor.timer("query_processing", timings):
@@ -155,6 +156,11 @@ class RAGPipeline:
             )
             query_type = search_type or query_info["query_type"]
             retrieval_query = query_info.get("rewritten_query") or question
+
+        global_query = query_type == "global"
+        output_k = max(top_k, settings.GLOBAL_CONTEXT_CHUNKS) if global_query else top_k
+        multiplier = 3 if global_query else settings.RETRIEVAL_CANDIDATE_MULTIPLIER
+        candidate_k = max(output_k * multiplier, output_k)
 
         # 2. Embed query
         with self.monitor.timer("embedding", timings):
@@ -168,11 +174,16 @@ class RAGPipeline:
 
         if query_type == "global":
             # Global search: Map-Reduce over community reports
-            with self.monitor.timer("global_search", timings):
-                global_result = await self.global_search.search(
-                    question=question,
-                    max_communities=settings.GLOBAL_SEARCH_MAX_COMMUNITIES,
-                )
+            # Community reports currently summarize the complete graph and cannot
+            # safely honor a document filter. Skip them for scoped searches rather
+            # than leaking information from unrelated documents.
+            global_result = {"intermediate_results": []}
+            if not document_ids:
+                with self.monitor.timer("global_search", timings):
+                    global_result = await self.global_search.search(
+                        question=question,
+                        max_communities=settings.GLOBAL_SEARCH_MAX_COMMUNITIES,
+                    )
 
             # For global, we still do semantic search for citations
             with self.monitor.timer("semantic_search", timings):
@@ -232,21 +243,55 @@ class RAGPipeline:
                         for r in reports[:3]
                     ]
 
+        if document_ids:
+            allowed_documents = {str(value) for value in document_ids}
+            graph_context_items = [
+                item for item in graph_context_items
+                if not item.get("document_ids")
+                or allowed_documents.intersection(str(value) for value in item.get("document_ids", []))
+            ]
+            # Community reports have no per-document provenance in the legacy
+            # graph schema, so a scoped request must not consume them.
+            community_context = []
+
         # 4. Independent sparse retrieval + true multi-list RRF + reranking.
         with self.monitor.timer("sparse_search", timings):
             corpus = await self._load_chunks(document_ids, query_info.get("metadata_filters"))
+            corpus = [row for row in corpus if row.get("chunk_type") != "toc"]
             sparse_lists = {
                 f"sparse_{index}": self.sparse_retriever.search(subquery, corpus, candidate_k)
                 for index, subquery in enumerate(query_info.get("subqueries") or [retrieval_query])
             }
             sparse_results = reciprocal_rank_fusion(sparse_lists)[:candidate_k]
             graph_results = self._graph_ranked_chunks(graph_context_items, corpus, candidate_k)
+            structure_results = (
+                self._structural_ranked_chunks(corpus, settings.GLOBAL_STRUCTURE_CANDIDATES)
+                if global_query else []
+            )
         with self.monitor.timer("reranking", timings):
             fused_candidates = reciprocal_rank_fusion(
-                {"dense": semantic_results, "sparse": sparse_results, "graph": graph_results},
-                weights={"dense": settings.DENSE_WEIGHT, "sparse": settings.SPARSE_WEIGHT, "graph": settings.GRAPH_WEIGHT},
+                {
+                    "dense": semantic_results,
+                    "sparse": sparse_results,
+                    "graph": graph_results,
+                    "structure": structure_results,
+                },
+                weights={
+                    "dense": settings.DENSE_WEIGHT,
+                    "sparse": settings.SPARSE_WEIGHT,
+                    "graph": settings.GRAPH_WEIGHT,
+                    "structure": settings.STRUCTURE_WEIGHT,
+                },
             )[:candidate_k]
-            fused_results = await self.reranker.rerank(retrieval_query, fused_candidates, top_k)
+            ranked_results = await self.reranker.rerank(
+                retrieval_query,
+                fused_candidates,
+                candidate_k if global_query else top_k,
+            )
+            fused_results = (
+                self._diversify_global_results(ranked_results, output_k)
+                if global_query else ranked_results[:top_k]
+            )
 
         # Parent-child retrieval: rank precise children, give the generator their
         # coherent parent section while retaining child spans for citations.
@@ -282,7 +327,8 @@ class RAGPipeline:
             f"{self._format_history(history)}\n\n{prompt}"
         )
 
-        citations = self._build_citations(fused_results)
+        cited_results = context.get("semantic_sources", context_results)
+        citations = self._build_citations(cited_results)
 
         # Determine mode
         if fused_results and graph_context_items:
@@ -303,12 +349,12 @@ class RAGPipeline:
             "prompt": prompt,
             "citations": citations,
             "graph_context": graph_context_meta,
-            "semantic_chunks_used": len(fused_results),
+            "semantic_chunks_used": len(cited_results),
             "graph_nodes_used": len(graph_entity_ids),
             "retrieval_mode": mode,
             "query_type": query_type,
             "timings_ms": timings,
-            "evidence_score": max((r.get("evidence_score", 0.0) for r in fused_results), default=0.0),
+            "evidence_score": self._aggregate_evidence_score(fused_results),
             "retrieved_results": fused_results,
         }
 
@@ -326,6 +372,7 @@ class RAGPipeline:
                 statement = statement.where(ChunkModel.section.ilike(f"%{filters['section_contains']}%"))
             if filters.get("chunk_type") in {"text", "table"}:
                 statement = statement.where(ChunkModel.chunk_type == filters["chunk_type"])
+            statement = statement.order_by(ChunkModel.document_id, ChunkModel.chunk_index)
             rows = (await db.execute(statement)).all()
         return [{
             "id": chunk.id, "document_id": chunk.document_id,
@@ -334,7 +381,76 @@ class RAGPipeline:
             "page_end": chunk.page_end, "section": chunk.section,
             "parent_id": chunk.parent_id, "parent_content": chunk.parent_content,
             "chunk_type": chunk.chunk_type,
+            "metadata": json.loads(chunk.metadata_json) if chunk.metadata_json else {},
         } for chunk, filename in rows]
+
+    @staticmethod
+    def _structure_key(row: Dict) -> tuple:
+        metadata = row.get("metadata") or {}
+        path = metadata.get("heading_path") or []
+        section = " > ".join(path) if isinstance(path, list) else str(path)
+        return str(row.get("document_id") or ""), section or str(row.get("section") or "(root)")
+
+    @classmethod
+    def _structural_ranked_chunks(cls, corpus: List[Dict], limit: int) -> List[Dict]:
+        """Round-robin representative sections so global questions see the corpus."""
+        by_document: Dict[str, List[Dict]] = {}
+        seen = set()
+        for row in corpus:
+            if len(str(row.get("content") or "").strip()) < 80:
+                continue
+            key = cls._structure_key(row)
+            if key in seen:
+                continue
+            seen.add(key)
+            item = dict(row)
+            item["retriever"] = "structure"
+            by_document.setdefault(key[0], []).append(item)
+        output = []
+        while by_document and len(output) < limit:
+            for document_id in list(by_document):
+                rows = by_document[document_id]
+                if rows:
+                    output.append(rows.pop(0))
+                if not rows:
+                    del by_document[document_id]
+                if len(output) >= limit:
+                    break
+        return output
+
+    @classmethod
+    def _diversify_global_results(cls, ranked: List[Dict], limit: int) -> List[Dict]:
+        """Prefer document and section coverage before filling by raw relevance."""
+        chosen, seen_ids, seen_docs, seen_sections = [], set(), set(), set()
+
+        def add(row):
+            item_id = str(row.get("id") or "")
+            if not item_id or item_id in seen_ids or len(chosen) >= limit:
+                return False
+            chosen.append(row)
+            seen_ids.add(item_id)
+            seen_docs.add(str(row.get("document_id") or ""))
+            seen_sections.add(cls._structure_key(row))
+            return True
+
+        for row in ranked:
+            if str(row.get("document_id") or "") not in seen_docs:
+                add(row)
+        for row in ranked:
+            if cls._structure_key(row) not in seen_sections:
+                add(row)
+        for row in ranked:
+            add(row)
+        return chosen
+
+    @staticmethod
+    def _aggregate_evidence_score(results: List[Dict]) -> float:
+        scores = sorted(
+            (max(0.0, min(1.0, float(row.get("evidence_score", 0.0)))) for row in results),
+            reverse=True,
+        )
+        strongest = scores[:3]
+        return sum(strongest) / len(strongest) if strongest else 0.0
 
     @staticmethod
     def _graph_ranked_chunks(graph_items: List[Dict], corpus: List[Dict], top_k: int) -> List[Dict]:
@@ -420,6 +536,7 @@ class RAGPipeline:
                 "retrieval_mode": retrieval["retrieval_mode"],
                 "query_type": retrieval.get("query_type", "hybrid"),
                 "confidence_score": processed["confidence_score"],
+                "confidence_calibrated": processed.get("confidence_calibrated", False),
                 "timings_ms": timings,
                 "warnings": processed.get("warnings", []),
                 "groundedness_score": processed.get("groundedness_score", 0.0),
@@ -481,9 +598,28 @@ class RAGPipeline:
 
         if retrieval["evidence_score"] < settings.RETRIEVAL_MIN_EVIDENCE_SCORE:
             no_answer = self._no_answer(question)
-            yield f"data: {json.dumps({'type': 'metadata', 'data': {'question': question, 'citations': retrieval['citations'], 'graph_context': retrieval['graph_context'], 'semantic_chunks_used': retrieval['semantic_chunks_used'], 'graph_nodes_used': retrieval['graph_nodes_used'], 'model_used': settings.LLM_MODEL, 'retrieval_mode': retrieval['retrieval_mode'], 'query_type': retrieval.get('query_type', 'hybrid'), 'timings_ms': timings}})}\n\n"
+            metadata = {
+                "question": question,
+                "citations": self._public_citations(retrieval["citations"]),
+                "graph_context": retrieval["graph_context"],
+                "semantic_chunks_used": retrieval["semantic_chunks_used"],
+                "graph_nodes_used": retrieval["graph_nodes_used"],
+                "model_used": settings.LLM_MODEL,
+                "retrieval_mode": retrieval["retrieval_mode"],
+                "query_type": retrieval.get("query_type", "hybrid"),
+                "timings_ms": timings,
+            }
+            yield f"data: {json.dumps({'type': 'metadata', 'data': metadata})}\n\n"
             yield f"data: {json.dumps({'type': 'token', 'data': {'text': no_answer}})}\n\n"
-            yield f"data: {json.dumps({'type': 'done', 'data': {'confidence_score': 0.0, 'groundedness_score': 0.0, 'warnings': ['Retrieved evidence is insufficient for a reliable answer'], 'timings_ms': timings}})}\n\n"
+            done = {
+                "confidence_score": 0.0,
+                "confidence_calibrated": self.answer_processor.grounding.calibrator.is_calibrated,
+                "groundedness_score": 0.0,
+                "claim_support": [],
+                "warnings": ["Retrieved evidence is insufficient for a reliable answer"],
+                "timings_ms": timings,
+            }
+            yield f"data: {json.dumps({'type': 'done', 'data': done})}\n\n"
             return
 
         # 1. Send metadata payload first
@@ -491,7 +627,7 @@ class RAGPipeline:
             "type": "metadata",
             "data": {
                 "question": question,
-                "citations": retrieval["citations"],
+                "citations": self._public_citations(retrieval["citations"]),
                 "graph_context": retrieval["graph_context"],
                 "semantic_chunks_used": retrieval["semantic_chunks_used"],
                 "graph_nodes_used": retrieval["graph_nodes_used"],
@@ -504,7 +640,8 @@ class RAGPipeline:
         }
         yield f"data: {json.dumps(meta_payload)}\n\n"
 
-        # 2. Stream tokens from Ollama
+        # 2. Buffer model output. Tokens are released only after claim-level
+        # verification so an unsupported sentence never reaches the client.
         payload = {
             "model": settings.LLM_MODEL,
             "prompt": retrieval["prompt"],
@@ -530,11 +667,6 @@ class RAGPipeline:
                             chunk = data.get("response", "")
                             if chunk:
                                 full_answer.append(chunk)
-                                token_event = {
-                                    "type": "token",
-                                    "data": {"text": chunk}
-                                }
-                                yield f"data: {json.dumps(token_event)}\n\n"
                         except json.JSONDecodeError:
                             continue
 
@@ -550,13 +682,23 @@ class RAGPipeline:
                 evidence_score=retrieval["evidence_score"],
             )
 
+            verified_answer = processed["answer"]
+            for offset in range(0, len(verified_answer), 96):
+                token_event = {
+                    "type": "token",
+                    "data": {"text": verified_answer[offset:offset + 96]},
+                }
+                yield f"data: {json.dumps(token_event)}\n\n"
+
             # 3. Send done event with post-processing results
             done_event = {
                 "type": "done",
                 "data": {
                     "confidence_score": processed["confidence_score"],
+                    "confidence_calibrated": processed.get("confidence_calibrated", False),
                     "warnings": processed.get("warnings", []),
                     "groundedness_score": processed.get("groundedness_score", 0.0),
+                    "claim_support": processed.get("claim_support", []),
                     "timings_ms": timings,
                 }
             }
@@ -586,6 +728,11 @@ class RAGPipeline:
                 "graph_nodes_used": retrieval["graph_nodes_used"],
                 "model_used": settings.LLM_MODEL,
                 "retrieval_mode": retrieval["retrieval_mode"],
+                "confidence_score": processed["confidence_score"],
+                "confidence_calibrated": processed.get("confidence_calibrated", False),
+                "groundedness_score": processed.get("groundedness_score", 0.0),
+                "claim_support": processed.get("claim_support", []),
+                "warnings": processed.get("warnings", []),
             }
 
         except Exception as e:
@@ -634,11 +781,19 @@ class RAGPipeline:
         return citations
 
     @staticmethod
+    def _public_citations(citations: List[Dict]) -> List[Dict]:
+        """Do not expose internal full-text verifier payloads over streaming SSE."""
+        return [
+            {
+                key: value for key, value in citation.items()
+                if key not in {"support_text", "evidence_score"}
+            }
+            for citation in citations
+        ]
+
+    @staticmethod
     def _no_answer(question: str) -> str:
-        vietnamese = any(char in question.lower() for char in "ăâđêôơưáàảãạéèẻẽẹíìỉĩịóòỏõọúùủũụýỳỷỹỵ")
-        return ("Tôi chưa tìm thấy đủ bằng chứng trong tài liệu để trả lời câu hỏi này."
-                if vietnamese else
-                "I could not find enough evidence in the documents to answer this question.")
+        return AnswerProcessor._no_answer(question)
 
     async def _call_llm(self, prompt: str) -> str:
         """Generate answer via Ollama /api/generate."""

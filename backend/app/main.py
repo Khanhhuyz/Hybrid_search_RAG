@@ -122,7 +122,7 @@ app.add_middleware(
 @app.middleware("http")
 async def add_author_watermark(request, call_next):
     response = await call_next(request)
-    response.headers["X-Author"] = "QuiNC (quinc-fptu) - CC BY-NC 4.0"
+    response.headers["X-Author"] = "HuyNNK - CC BY-NC 4.0"
     return response
 
 # ─── Routers ─────────────────────────────────────────────────────────────────
@@ -182,7 +182,7 @@ async def health_check():
     return {
         "status": overall_status,
         "version": settings.APP_VERSION,
-        "author": "QuiNC (quinc-fptu)",
+        "author": "HuyNNK",
         "license": "CC BY-NC 4.0",
         "services": {
             "ollama":  ollama_status,
@@ -197,7 +197,7 @@ async def root():
     return {
         "name":    settings.APP_NAME,
         "version": settings.APP_VERSION,
-        "author":  "QuiNC (quinc-fptu)",
+        "author":  "HuyNNK",
         "license": "CC BY-NC 4.0",
         "docs":    "/docs",
         "api":     settings.API_PREFIX,

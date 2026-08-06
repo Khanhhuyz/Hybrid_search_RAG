@@ -34,7 +34,7 @@ class ContextBuilder:
         graph_context: List[Dict],
         community_context: Optional[List[Dict]] = None,
         question: str = "",
-    ) -> Dict[str, str]:
+    ) -> Dict:
         """
         Build formatted context sections with token budget management.
 
@@ -66,8 +66,13 @@ class ContextBuilder:
         budget -= len(community_text)
 
         # 3. Semantic context — document chunks (use remaining budget)
-        semantic_text = self._format_semantic_context(semantic_results, budget)
+        semantic_text, semantic_sources = self._format_semantic_context_with_sources(
+            semantic_results, budget
+        )
         result["semantic_context"] = semantic_text
+        # Preserve the exact, possibly truncated text shown to the model. Citation
+        # verification must never compare a claim with a different child/parent span.
+        result["semantic_sources"] = semantic_sources
 
         total_used = len(graph_text) + len(community_text) + len(semantic_text)
         result["total_chars_used"] = total_used
@@ -85,10 +90,17 @@ class ContextBuilder:
         self, results: List[Dict], budget: int
     ) -> str:
         """Format document chunks as XML-tagged sources with anti-injection."""
+        return self._format_semantic_context_with_sources(results, budget)[0]
+
+    def _format_semantic_context_with_sources(
+        self, results: List[Dict], budget: int
+    ) -> tuple[str, List[Dict]]:
+        """Return prompt text plus the exact source spans included in it."""
         if not results:
-            return "No relevant document chunks found."
+            return "No relevant document chunks found.", []
 
         parts = []
+        included = []
         used = 0
 
         for i, r in enumerate(results):
@@ -110,12 +122,18 @@ class ContextBuilder:
             safe_text = escape(text[:available])
             block = f"{header}{safe_text}{footer}"
             parts.append(block)
+            source = dict(r)
+            source["content"] = text[:available]
+            included.append(source)
             used += len(block)
 
             if len(safe_text) < len(escape(text)):
                 break
 
-        return "\n\n".join(parts) if parts else "No relevant document chunks found."
+        return (
+            "\n\n".join(parts) if parts else "No relevant document chunks found.",
+            included,
+        )
 
     # ─── Graph Context ───────────────────────────────────────────────────────
 

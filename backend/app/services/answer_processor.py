@@ -42,36 +42,52 @@ class AnswerProcessor:
             }
         """
         warnings = []
+        cleaned_answer = self._clean_answer(answer)
 
-        # 1. Citation validation
-        citation_valid, citation_warnings = self._validate_citations(answer, citations)
+        # Explicit no-answer responses are safe and must not receive confidence
+        # merely because retrieval returned several unrelated chunks.
+        if self.grounding.is_no_answer(cleaned_answer):
+            return {
+                "answer": self._no_answer(question),
+                "confidence_score": 0.0,
+                "confidence_calibrated": self.grounding.calibrator.is_calibrated,
+                "citation_valid": True,
+                "warnings": ["The answer abstained because evidence was insufficient"],
+                "groundedness_score": 0.0,
+                "claim_support": [],
+            }
+
+        verification = self.grounding.verify(cleaned_answer, citations)
+        citation_valid, citation_warnings = self._validate_citations(
+            cleaned_answer, citations, verification["claims"]
+        )
         warnings.extend(citation_warnings)
-
-        # 2. Verify every factual claim against the cited source text, then
-        # calibrate confidence from evidence quality instead of answer length.
-        verification = self.grounding.verify(answer, citations)
         unsupported = [item for item in verification["claims"] if not item["supported"]]
         if unsupported:
             warnings.append(f"{len(unsupported)} claim(s) lack sufficient cited evidence")
-        confidence = self.grounding.calibrated_confidence(
+        confidence, confidence_calibrated = self.grounding.confidence(
             evidence_score=evidence_score,
             groundedness=verification["groundedness_score"],
         )
+        if not confidence_calibrated:
+            warnings.append("Confidence is using the conservative fallback; fit a calibration model")
 
-        # 3. Clean answer
-        cleaned_answer = self._clean_answer(answer)
-
-        # 4. Check for empty/unhelpful answer
-        if len(cleaned_answer.strip()) < 10:
-            warnings.append("Answer is very short, may lack detail")
-            confidence = min(confidence, 0.2)
+        insufficient = (
+            evidence_score < settings.RETRIEVAL_MIN_EVIDENCE_SCORE
+            or not verification["claims"]
+            or bool(unsupported)
+            or not citation_valid
+        )
         if evidence_score < settings.RETRIEVAL_MIN_EVIDENCE_SCORE:
             warnings.append("Retrieved evidence is insufficient for a reliable answer")
-            confidence = min(confidence, settings.NO_ANSWER_CONFIDENCE_THRESHOLD - 0.01)
+        if settings.GROUNDING_ENFORCED and insufficient:
+            cleaned_answer = self._no_answer(question)
+            confidence = 0.0
 
         return {
             "answer": cleaned_answer,
             "confidence_score": round(confidence, 3),
+            "confidence_calibrated": confidence_calibrated,
             "citation_valid": citation_valid,
             "warnings": warnings,
             "groundedness_score": verification["groundedness_score"],
@@ -79,7 +95,7 @@ class AnswerProcessor:
         }
 
     def _validate_citations(
-        self, answer: str, citations: List[Dict]
+        self, answer: str, citations: List[Dict], claims: Optional[List[Dict]] = None
     ) -> tuple:
         """Check that all citation references in the answer exist in the citation list."""
         warnings = []
@@ -95,71 +111,24 @@ class AnswerProcessor:
                 f"Answer references non-existent sources: {', '.join(sorted(invalid))}"
             )
 
-        is_valid = len(invalid) == 0
+        claims = claims or []
+        missing = [item for item in claims if not item.get("citations")]
+        if missing:
+            warnings.append(f"{len(missing)} factual claim(s) have no citation")
+        is_valid = len(invalid) == 0 and not missing and bool(claims)
         return is_valid, warnings
 
-    def _calculate_confidence(
-        self,
-        answer: str,
-        semantic_chunks_used: int,
-        graph_nodes_used: int,
-        retrieval_mode: str,
-        citation_count: int,
-    ) -> float:
-        """
-        Calculate confidence score (0.0 - 1.0) based on:
-        - Number of retrieval sources
-        - Retrieval mode richness
-        - Answer length
-        - Citation presence
-        """
-        score = 0.3  # Base score
-
-        # Source coverage (more sources = higher confidence)
-        if semantic_chunks_used >= 3:
-            score += 0.15
-        elif semantic_chunks_used >= 1:
-            score += 0.08
-
-        if graph_nodes_used >= 2:
-            score += 0.15
-        elif graph_nodes_used >= 1:
-            score += 0.08
-
-        # Retrieval mode bonus
-        mode_bonus = {
-            "hybrid": 0.15,
-            "local": 0.12,
-            "global": 0.12,
-            "semantic": 0.05,
-            "graph": 0.05,
-        }
-        score += mode_bonus.get(retrieval_mode, 0)
-
-        # Citation bonus
-        if citation_count >= 3:
-            score += 0.1
-        elif citation_count >= 1:
-            score += 0.05
-
-        # Answer length bonus (longer = more detailed)
-        if len(answer) > 500:
-            score += 0.1
-        elif len(answer) > 200:
-            score += 0.05
-
-        # Hedging penalty — phrases indicating uncertainty
-        hedging_phrases = [
-            "i don't know", "không biết", "không có thông tin",
-            "context does not contain", "cannot determine",
-            "không đủ thông tin", "i'm not sure",
-        ]
-        for phrase in hedging_phrases:
-            if phrase.lower() in answer.lower():
-                score -= 0.2
-                break
-
-        return max(0.0, min(1.0, score))
+    @staticmethod
+    def _no_answer(question: str) -> str:
+        vietnamese = any(
+            char in (question or "").casefold()
+            for char in "ăâđêôơưáàảãạéèẻẽẹíìỉĩịóòỏõọúùủũụýỳỷỹỵ"
+        )
+        return (
+            "Tôi chưa tìm thấy đủ bằng chứng trong tài liệu để trả lời câu hỏi này."
+            if vietnamese else
+            "I could not find enough evidence in the documents to answer this question."
+        )
 
     def _clean_answer(self, answer: str) -> str:
         """Clean up common LLM output artifacts."""

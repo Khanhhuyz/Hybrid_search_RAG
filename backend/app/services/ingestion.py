@@ -21,12 +21,13 @@ async def _progress(db, doc_id, stage, current=0, total=0, **extra):
     await db.execute(update(DocumentModel).where(DocumentModel.id == doc_id).values(**extra))
     await db.commit()
 
-def _as_dict(c):
+def _as_dict(c, document_filename=""):
     return {"id": c.id, "document_id": c.document_id, "content": c.content,
             "chunk_index": c.chunk_index, "page_number": c.page_number, "section": c.section,
             "page_end": c.page_end, "parent_id": c.parent_id, "chunk_type": c.chunk_type,
             "parent_content": c.parent_content,
             "metadata": json.loads(c.metadata_json) if c.metadata_json else {},
+            "document_filename": document_filename,
             "char_start": c.char_start, "char_end": c.char_end, "token_count": c.token_count}
 
 def sample_chunks(chunks, limit):
@@ -51,7 +52,7 @@ async def process_document(doc_id, file_path, file_type, original_name, embedder
                 models = [ChunkModel(**{key: item.get(key) for key in fields}, metadata_json=json.dumps(item.get("metadata", {}), ensure_ascii=False)) for item in chunks]
                 db.add_all(models)
                 await db.commit()
-            chunks, total = [_as_dict(c) for c in models], len(models)
+            chunks, total = [_as_dict(c, original_name) for c in models], len(models)
             pending = [(c, m) for c, m in zip(chunks, models) if not m.embedded]
             completed = total - len(pending)
             await _progress(db, doc_id, "embedding", completed, total, chunk_count=total)
@@ -64,7 +65,10 @@ async def process_document(doc_id, file_path, file_type, original_name, embedder
                 await db.execute(update(ChunkModel).where(ChunkModel.id.in_([x[1].id for x in batch])).values(embedded=True))
                 completed += len(batch)
                 await _progress(db, doc_id, "embedding", completed, total, chunk_count=total)
-            graph_chunks = sample_chunks(chunks, settings.GRAPH_MAX_CHUNKS_PER_DOCUMENT)
+            graph_chunks = sample_chunks(
+                [c for c in chunks if c.get("chunk_type") == "text"],
+                settings.GRAPH_MAX_CHUNKS_PER_DOCUMENT,
+            )
             await _progress(db, doc_id, "graph", 0, len(graph_chunks), chunk_count=total)
             entities, warning = 0, None
             try:
@@ -78,7 +82,8 @@ async def process_document(doc_id, file_path, file_type, original_name, embedder
                 warning = f"Vector indexing completed; graph indexing failed: {exc}"[:500]
                 logger.warning("Graph indexing failed for %s: %s", doc_id, exc)
             await _progress(db, doc_id, "completed", total, total, status=ProcessingStatus.COMPLETED,
-                            chunk_count=total, entity_count=entities, error_message=warning)
+                            chunk_count=total, entity_count=entities, error_message=warning,
+                            index_version=settings.INDEX_SCHEMA_VERSION)
         except asyncio.CancelledError:
             logger.info("Ingestion %s interrupted; it will resume on startup", doc_id)
             raise
@@ -113,14 +118,17 @@ async def recover(embedder, vector_store, graph_builder):
 async def reset_document(db, doc, vector_store, graph_builder):
     if is_active(doc.id):
         raise RuntimeError("Document is already being processed")
+    chunk_rows = await db.execute(select(ChunkModel.id).where(ChunkModel.document_id == doc.id))
+    chunk_ids = list(chunk_rows.scalars().all())
     await vector_store.delete_by_document(doc.id)
     try:
-        graph_builder.delete_document_entities(doc.id)
+        graph_builder.delete_document_entities(doc.id, chunk_ids=chunk_ids)
     except Exception as exc:
         logger.warning("Graph cleanup failed for %s: %s", doc.id, exc)
     await db.execute(delete(ChunkModel).where(ChunkModel.document_id == doc.id))
     doc.status, doc.progress_stage, doc.error_message = ProcessingStatus.PENDING, "queued", None
     doc.chunk_count = doc.entity_count = doc.progress_current = doc.progress_total = 0
+    doc.index_version = 0
     await db.commit()
 
 async def shutdown():

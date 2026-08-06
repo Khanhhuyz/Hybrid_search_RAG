@@ -18,6 +18,7 @@ export interface Document {
   file_type: string;
   file_size: number;
   status: ProcessingStatus;
+  index_version: number;
   chunk_count: number;
   entity_count: number;
   error_message?: string;
@@ -83,6 +84,16 @@ export interface ChatResponse {
   retrieval_mode: "semantic" | "graph" | "hybrid" | "global";
   query_type?: string;
   confidence_score?: number;
+  confidence_calibrated?: boolean;
+  groundedness_score?: number;
+  claim_support?: Array<{
+    claim: string;
+    citations: string[];
+    invalid_citations?: string[];
+    support_score: number;
+    reason?: string | null;
+    supported: boolean;
+  }>;
   timings_ms?: Record<string, number>;
   warnings?: string[];
 }
@@ -302,7 +313,10 @@ export const chatApi = {
     onToken: (token: string) => void,
     onError: (error: string) => void,
     searchType: SearchType = "auto",
-    onDone?: (data: { confidence_score?: number; warnings?: string[]; timings_ms?: Record<string, number> }) => void
+    onDone?: (data: Pick<ChatResponse,
+      "confidence_score" | "confidence_calibrated" | "groundedness_score" |
+      "claim_support" | "warnings" | "timings_ms"
+    >) => void
   ): Promise<void> => {
     const url = `${API_BASE}/chat/stream`;
     const response = await fetch(url, {

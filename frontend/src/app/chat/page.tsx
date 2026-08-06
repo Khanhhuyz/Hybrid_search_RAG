@@ -16,6 +16,8 @@ interface Message {
   error?: string;
   loading?: boolean;
   confidenceScore?: number;
+  confidenceCalibrated?: boolean;
+  groundednessScore?: number;
   timingsMs?: Record<string, number>;
   warnings?: string[];
 }
@@ -126,6 +128,9 @@ export default function ChatPage() {
                     retrieval_mode: metadata.retrieval_mode || "hybrid",
                     query_type: metadata.query_type,
                     confidence_score: metadata.confidence_score,
+                    confidence_calibrated: metadata.confidence_calibrated,
+                    groundedness_score: metadata.groundedness_score,
+                    claim_support: metadata.claim_support,
                     timings_ms: metadata.timings_ms,
                   },
                 }
@@ -161,6 +166,8 @@ export default function ChatPage() {
                 ? {
                   ...m,
                   confidenceScore: doneData.confidence_score,
+                  confidenceCalibrated: doneData.confidence_calibrated,
+                  groundednessScore: doneData.groundedness_score,
                   timingsMs: doneData.timings_ms,
                   warnings: doneData.warnings,
                 }
@@ -335,7 +342,10 @@ export default function ChatPage() {
                     )}
                     {/* Confidence badge */}
                     {msg.confidenceScore !== undefined && (
-                      <ConfidenceBadge score={msg.confidenceScore} />
+                      <ConfidenceBadge
+                        score={msg.confidenceScore}
+                        calibrated={msg.confidenceCalibrated === true}
+                      />
                     )}
                     {/* Total latency */}
                     {msg.timingsMs && (
@@ -463,7 +473,7 @@ export default function ChatPage() {
   );
 }
 
-function ConfidenceBadge({ score }: { score: number }) {
+function ConfidenceBadge({ score, calibrated }: { score: number; calibrated: boolean }) {
   const pct = Math.round(score * 100);
   let color = "text-emerald-400 bg-emerald-500/10 border-emerald-500/20";
   if (score < 0.4) {
@@ -473,9 +483,12 @@ function ConfidenceBadge({ score }: { score: number }) {
   }
 
   return (
-    <span className={`px-2 py-0.5 rounded-full border flex items-center gap-1 ${color}`}>
+    <span
+      title={calibrated ? "Calibrated confidence" : "Conservative fallback; not calibrated"}
+      className={`px-2 py-0.5 rounded-full border flex items-center gap-1 ${color}`}
+    >
       <Shield size={10} />
-      {pct}%
+      {pct}%{calibrated ? "" : " · uncalibrated"}
     </span>
   );
 }

@@ -31,6 +31,14 @@ class TestEvaluator(unittest.TestCase):
         self.assertEqual(report["aggregate"]["f1"], 1.0)
         self.assertEqual(report["aggregate"]["answer_token_f1"], 1.0)
 
+    def test_confidence_calibration_metrics(self):
+        metrics = Evaluator.confidence_metrics([
+            {"confidence_score": 0.9, "is_correct": True},
+            {"confidence_score": 0.8, "is_correct": False},
+        ])
+        self.assertAlmostEqual(metrics["confidence_brier"], 0.325, places=3)
+        self.assertGreater(metrics["confidence_ece"], 0.0)
+
 
 if __name__ == "__main__":
     unittest.main()

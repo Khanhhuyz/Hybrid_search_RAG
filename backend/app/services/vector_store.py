@@ -39,26 +39,67 @@ class VectorStoreService:
             self.client = QdrantClient(path=str(settings.QDRANT_PATH))
         self.collection = settings.QDRANT_COLLECTION
         self.dimension  = settings.EMBEDDING_DIMENSION
+        self._collection_lock = asyncio.Lock()
 
     # ─── Initialization ───────────────────────────────────────────────────────
 
     async def ensure_collection(self):
         """Create the Qdrant collection if it doesn't exist (non-blocking)."""
-        collections = await asyncio.to_thread(self.client.get_collections)
-        existing = [c.name for c in collections.collections]
+        # Startup may run before a remote/containerized Qdrant is ready.  Since
+        # ingestion can start later without another application restart, make
+        # collection initialization safe to call from every write operation.
+        async with self._collection_lock:
+            collections = await asyncio.to_thread(self.client.get_collections)
+            existing = [c.name for c in collections.collections]
 
-        if self.collection not in existing:
-            await asyncio.to_thread(
-                self.client.create_collection,
-                collection_name=self.collection,
-                vectors_config=VectorParams(
-                    size=self.dimension,
-                    distance=Distance.COSINE,
-                ),
-            )
-            logger.info(f"Created Qdrant collection: {self.collection}")
-        else:
-            logger.info(f"Qdrant collection '{self.collection}' already exists")
+            if self.collection in existing:
+                info = await asyncio.to_thread(
+                    self.client.get_collection, self.collection
+                )
+                vectors = info.config.params.vectors
+                valid = (
+                    isinstance(vectors, VectorParams)
+                    and vectors.size == self.dimension
+                    and vectors.distance == Distance.COSINE
+                )
+                if valid:
+                    logger.info(f"Qdrant collection '{self.collection}' already exists")
+                    return
+
+                point_count = getattr(info, "points_count", None)
+                if point_count is None:
+                    point_count = getattr(info, "vectors_count", 0) or 0
+                if point_count:
+                    raise RuntimeError(
+                        f"Qdrant collection '{self.collection}' has an incompatible "
+                        f"vector configuration and contains {point_count} point(s); "
+                        "refusing to delete existing data"
+                    )
+
+                # A failed/legacy setup can leave behind an empty collection with
+                # vectors={}. It cannot accept either named or unnamed vectors, so
+                # it is safe and necessary to replace it before ingestion.
+                logger.warning(
+                    "Recreating empty Qdrant collection '%s' because its vector "
+                    "configuration is incompatible: %r",
+                    self.collection,
+                    vectors,
+                )
+                await asyncio.to_thread(
+                    self.client.delete_collection,
+                    collection_name=self.collection,
+                )
+
+            if self.collection not in existing or not valid:
+                await asyncio.to_thread(
+                    self.client.create_collection,
+                    collection_name=self.collection,
+                    vectors_config=VectorParams(
+                        size=self.dimension,
+                        distance=Distance.COSINE,
+                    ),
+                )
+                logger.info(f"Created Qdrant collection: {self.collection}")
 
     # ─── Upsert ───────────────────────────────────────────────────────────────
 
@@ -71,6 +112,10 @@ class VectorStoreService:
         """Store chunks with their embeddings in Qdrant in batches (non-blocking)."""
         if len(chunks) != len(embeddings):
             raise ValueError("chunks and embeddings must have the same length")
+
+        # Self-heal if Qdrant was unavailable during the application's startup
+        # hook, or if the collection was removed while the API kept running.
+        await self.ensure_collection()
 
         points = []
         for chunk, vector in zip(chunks, embeddings):
@@ -117,29 +162,30 @@ class VectorStoreService:
         top_k: int = 5,
         document_ids: Optional[List[str]] = None,
         score_threshold: float = None,
+        exclude_chunk_types: Optional[List[str]] = None,
     ) -> List[Dict[str, Any]]:
-        """Perform cosine similarity search with optional document filter (non-blocking)."""
-        qdrant_filter = None
+        """Search vectors while excluding structural-only chunks such as a TOC."""
+        must = []
+        should = []
+        excluded = ["toc"] if exclude_chunk_types is None else exclude_chunk_types
         if document_ids:
             if len(document_ids) == 1:
-                qdrant_filter = Filter(
-                    must=[
-                        FieldCondition(
-                            key="document_id",
-                            match=MatchValue(value=document_ids[0]),
-                        )
-                    ]
+                must.append(
+                    FieldCondition(
+                        key="document_id",
+                        match=MatchValue(value=document_ids[0]),
+                    )
                 )
             else:
-                qdrant_filter = Filter(
-                    should=[
-                        FieldCondition(
-                            key="document_id",
-                            match=MatchValue(value=did),
-                        )
-                        for did in document_ids
-                    ]
+                should.extend(
+                    FieldCondition(key="document_id", match=MatchValue(value=did))
+                    for did in document_ids
                 )
+        must_not = [
+            FieldCondition(key="chunk_type", match=MatchValue(value=kind))
+            for kind in excluded
+        ]
+        qdrant_filter = Filter(must=must, should=should, must_not=must_not) if (must or should or must_not) else None
 
         threshold = score_threshold if score_threshold is not None else settings.SIMILARITY_THRESHOLD
         kwargs: Dict[str, Any] = {

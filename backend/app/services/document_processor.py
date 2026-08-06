@@ -112,7 +112,9 @@ class DocumentProcessor:
                 continue
             style = (paragraph.style.name or "").lower()
             if style.startswith("heading"):
-                value = f"# {value}"
+                match = re.search(r"(\d+)", style)
+                level = min(6, max(1, int(match.group(1)))) if match else 1
+                value = f"{'#' * level} {value}"
             body.append(value)
         for table in doc.tables:
             value = self._table_markdown([[cell.text for cell in row.cells] for row in table.rows])

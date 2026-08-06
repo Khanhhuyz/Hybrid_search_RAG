@@ -37,6 +37,7 @@ class DocumentResponse(DocumentBase):
     status: ProcessingStatus
     chunk_count: int
     entity_count: int
+    index_version: int = 0
     error_message: Optional[str]
     progress_stage: str = "queued"
     progress_current: int = 0
@@ -209,6 +210,7 @@ class ChatResponse(BaseModel):
     retrieval_mode: str  # "semantic" | "graph" | "hybrid" | "global"
     query_type: str = "hybrid"  # "local" | "global" | "hybrid"
     confidence_score: float = 0.0
+    confidence_calibrated: bool = False
     timings_ms: Dict[str, float] = Field(default_factory=dict)
     warnings: List[str] = Field(default_factory=list)
     groundedness_score: float = 0.0

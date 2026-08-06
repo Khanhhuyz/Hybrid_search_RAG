@@ -114,6 +114,11 @@ class QueryProcessor:
         if matched_entities and final_type == "global":
             final_type = "hybrid"
 
+        # Strong whole-corpus language must not be downgraded by an unstable LLM
+        # classifier; this route activates structural coverage retrieval.
+        if heuristic_type == "global" and not matched_entities:
+            final_type = "global"
+
         # 5. Override: if no entities and no specific pattern, lean toward basic
         if not matched_entities and not extracted_entities and final_type == "local":
             final_type = "hybrid"
@@ -125,7 +130,7 @@ class QueryProcessor:
             "extracted_entities": extracted_entities,
             "matched_graph_entities": matched_entities,
             "subqueries": subqueries[:4],
-            "metadata_filters": {k: v for k, v in metadata_filters.items() if v},
+            "metadata_filters": self._sanitize_metadata_filters(question, metadata_filters),
         }
 
         logger.info(
@@ -134,6 +139,20 @@ class QueryProcessor:
             f"extracted={len(extracted_entities)}"
         )
         return result
+
+    @staticmethod
+    def _sanitize_metadata_filters(question: str, filters: Dict) -> Dict:
+        """Accept only filters explicitly grounded in the user's query."""
+        lowered = question.casefold()
+        output = {}
+        for key in ("filename_contains", "section_contains"):
+            value = str(filters.get(key) or "").strip()
+            if value and value.casefold() in lowered:
+                output[key] = value
+        chunk_type = str(filters.get("chunk_type") or "").casefold()
+        if chunk_type == "table" and any(term in lowered for term in ("table", "bảng")):
+            output["chunk_type"] = "table"
+        return output
 
     @staticmethod
     def _decompose_heuristic(question: str) -> List[str]:

@@ -74,6 +74,7 @@ class Neo4jStore:
             e.label = $label,
             e.entity_type = $entity_type,
             e.document_ids = [$document_id],
+            e.source_chunk_ids = $source_chunk_ids,
             e.created_at = datetime()
         ON MATCH SET
             e.label = CASE WHEN size(e.label) < size($label) THEN $label ELSE e.label END,
@@ -82,6 +83,10 @@ class Neo4jStore:
                 THEN e.document_ids + $document_id
                 ELSE e.document_ids
             END,
+            e.source_chunk_ids = reduce(
+                acc = coalesce(e.source_chunk_ids, []), chunk IN $source_chunk_ids |
+                CASE WHEN chunk IN acc THEN acc ELSE acc + chunk END
+            ),
             e.updated_at = datetime()
         WITH e, e.updated_at IS NULL AS is_new
         RETURN is_new
@@ -91,20 +96,23 @@ class Neo4jStore:
             "label": label,
             "entity_type": entity_type,
             "document_id": document_id,
+            "source_chunk_ids": list((properties or {}).get("source_chunk_ids", [])),
         }
         with self._driver.session(database=settings.NEO4J_DATABASE) as session:
             result = session.run(query, params)
             record = result.single()
 
-            # Set additional properties if provided
-            if properties:
-                prop_query = """
-                MATCH (e:Entity {node_id: $node_id})
-                SET e += $props
-                """
-                session.run(prop_query, {"node_id": node_id, "props": properties})
-
             return record["is_new"] if record else False
+
+    def get_entity_labels(self) -> List[str]:
+        """Return canonical labels so normalization also deduplicates after restarts."""
+        with self._driver.session(database=settings.NEO4J_DATABASE) as session:
+            return [
+                record["label"]
+                for record in session.run(
+                    "MATCH (e:Entity) WHERE e.label IS NOT NULL RETURN DISTINCT e.label AS label"
+                )
+            ]
 
     def upsert_relationship(
         self,
@@ -302,7 +310,11 @@ class Neo4jStore:
                 context.append({"text": f"{label} is a {etype}", "source": "graph"})
 
                 for rel in record["out_rels"]:
-                    if rel["target_label"]:
+                    if (
+                        rel["target_label"]
+                        and rel.get("confidence", 0.0) >= settings.GRAPH_MIN_RELATION_CONFIDENCE
+                        and (rel.get("chunk_ids") or rel.get("document_ids"))
+                    ):
                         rel_text = rel["relation"].replace("_", " ")
                         desc = f" ({rel['description']})" if rel["description"] else ""
                         context.append({
@@ -316,7 +328,11 @@ class Neo4jStore:
                         })
 
                 for rel in record["in_rels"]:
-                    if rel["source_label"]:
+                    if (
+                        rel["source_label"]
+                        and rel.get("confidence", 0.0) >= settings.GRAPH_MIN_RELATION_CONFIDENCE
+                        and (rel.get("chunk_ids") or rel.get("document_ids"))
+                    ):
                         rel_text = rel["relation"].replace("_", " ")
                         desc = f" ({rel['description']})" if rel["description"] else ""
                         context.append({
@@ -514,19 +530,35 @@ class Neo4jStore:
 
     # ─── Delete Operations ───────────────────────────────────────────────────
 
-    def delete_document_entities(self, document_id: str):
+    def delete_document_entities(
+        self, document_id: str, chunk_ids: Optional[List[str]] = None
+    ):
         """Remove entities and relationships that belong only to this document."""
-        # Remove document_id from arrays, then delete orphaned nodes
+        # Remove relationship provenance first; retained nodes must not keep stale
+        # edges from the document being re-indexed.
+        relationship_query = """
+        MATCH ()-[r:RELATES_TO]->()
+        WHERE $document_id IN coalesce(r.document_ids, [])
+        SET r.document_ids = [d IN r.document_ids WHERE d <> $document_id],
+            r.source_chunk_ids = [c IN coalesce(r.source_chunk_ids, []) WHERE NOT c IN $chunk_ids]
+        WITH r WHERE size(r.document_ids) = 0
+        DELETE r
+        """
         query = """
         MATCH (e:Entity)
         WHERE $document_id IN e.document_ids
-        SET e.document_ids = [d IN e.document_ids WHERE d <> $document_id]
+        SET e.document_ids = [d IN e.document_ids WHERE d <> $document_id],
+            e.source_chunk_ids = [c IN coalesce(e.source_chunk_ids, []) WHERE NOT c IN $chunk_ids]
         WITH e WHERE size(e.document_ids) = 0
         DETACH DELETE e
         """
+        params = {"document_id": document_id, "chunk_ids": chunk_ids or []}
         with self._driver.session(database=settings.NEO4J_DATABASE) as session:
-            result = session.run(query, {"document_id": document_id})
+            session.run(relationship_query, params).consume()
+            result = session.run(query, params)
             summary = result.consume()
+            # Reports are derived artifacts and become invalid after graph edits.
+            session.run("MATCH (c:Community) DETACH DELETE c").consume()
             deleted = summary.counters.nodes_deleted
             logger.info(f"Removed {deleted} orphaned entities for document {document_id}")
 
@@ -534,9 +566,17 @@ class Neo4jStore:
         """Export all entities and relationships as adjacency data for igraph/Leiden."""
         query = """
         MATCH (e:Entity)
-        WITH COLLECT({node_id: e.node_id, label: e.label, type: e.entity_type}) AS nodes
+        WITH COLLECT({node_id: e.node_id, label: e.label, type: e.entity_type,
+                      document_ids: coalesce(e.document_ids, [])}) AS nodes
         OPTIONAL MATCH (src:Entity)-[r:RELATES_TO]->(tgt:Entity)
-        WITH nodes, COLLECT({source: src.node_id, target: tgt.node_id, weight: r.weight}) AS edges
+        WITH nodes, COLLECT({
+            source: src.node_id, target: tgt.node_id,
+            source_label: src.label, target_label: tgt.label,
+            relation: r.relation_type, weight: r.weight,
+            evidence: coalesce(r.evidence, ''), confidence: coalesce(r.confidence, 0.0),
+            document_ids: coalesce(r.document_ids, []),
+            chunk_ids: coalesce(r.source_chunk_ids, [])
+        }) AS edges
         RETURN nodes, edges
         """
         with self._driver.session(database=settings.NEO4J_DATABASE) as session:

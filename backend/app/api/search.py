@@ -158,8 +158,11 @@ async def chat(
             retrieval_mode=result["retrieval_mode"],
             query_type=result.get("query_type", "hybrid"),
             confidence_score=result.get("confidence_score", 0.0),
+            confidence_calibrated=result.get("confidence_calibrated", False),
             timings_ms=result.get("timings_ms", {}),
             warnings=result.get("warnings", []),
+            groundedness_score=result.get("groundedness_score", 0.0),
+            claim_support=result.get("claim_support", []),
         )
     except Exception as e:
         logger.error(f"Chat error: {e}", exc_info=True)
